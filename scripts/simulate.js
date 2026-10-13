@@ -1,7 +1,7 @@
 // Roda várias partidas só com bots para checar o balanceamento do jogo.
 // Uso: node scripts/simulate.js [partidas] [períodos]
 import { createCompany, createRng, defaultDecisions, generateEnvironment, initialEnvironment, periodSeed, simulatePeriod } from '../src/engine.js';
-import { BOT_PROFILES, botDecisions } from '../src/bots.js';
+import { BOT_PROFILES, botTurn } from '../src/bots.js';
 
 const games = Number(process.argv[2] ?? 200);
 const periods = Number(process.argv[3] ?? 10);
@@ -9,6 +9,8 @@ const players = [...Object.keys(BOT_PROFILES), 'padrao'];
 const tsr = Object.fromEntries(players.map((p) => [p, []]));
 const wins = Object.fromEntries(players.map((p) => [p, 0]));
 let emergencies = 0;
+let scandals = 0;
+let acquisitions = 0;
 
 for (let g = 0; g < games; g++) {
   const seed = 1000 + g;
@@ -18,16 +20,25 @@ for (let g = 0; g < games; g++) {
   for (let period = 1; period <= periods; period++) {
     const botRng = createRng(periodSeed(seed, period, 3));
     const decisions = {};
+    const moves = {};
     for (const c of companies) {
-      decisions[c.id] = c.id === 'padrao' ? defaultDecisions() : botDecisions(c, env, last[c.id], c.id, botRng);
+      if (c.id === 'padrao') {
+        decisions[c.id] = defaultDecisions();
+      } else {
+        ({ decisions: decisions[c.id], moves: moves[c.id] } = botTurn(c, env, last[c.id], c.id, botRng));
+      }
     }
-    const res = simulatePeriod(companies, decisions, env, createRng(periodSeed(seed, period, 1)), period);
+    const res = simulatePeriod(companies, decisions, env, createRng(periodSeed(seed, period, 1)), period, moves, {
+      finalPeriod: period === periods,
+    });
     companies = res.companies;
     for (const [id, r] of Object.entries(res.reports)) {
       last[id] = r;
       if (r.cashflow.emergencyLoan > 0) emergencies++;
+      scandals += r.events.scandals.length;
+      if (r.events.acquired) acquisitions++;
     }
-    env = generateEnvironment(env, createRng(periodSeed(seed, period + 1, 2)));
+    env = generateEnvironment(env, createRng(periodSeed(seed, period + 1, 2)), period + 1);
   }
   let best = null;
   for (const id of players) {
@@ -47,4 +58,4 @@ for (const id of players) {
     `mín ${(sorted[0] * 100).toFixed(1).padStart(6)}%  máx ${(sorted.at(-1) * 100).toFixed(1).padStart(6)}%  vitórias ${wins[id]}`,
   );
 }
-console.log(`empréstimos emergenciais: ${emergencies}`);
+console.log(`empréstimos emergenciais: ${emergencies} · escândalos: ${scandals} · aquisições: ${acquisitions}`);

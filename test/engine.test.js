@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  CONFIG, DECISIONS, capacityOf, createCompany, createRng, defaultDecisions, equityOf, generateEnvironment,
+  CONFIG, DECISIONS, ILLEGAL_PRACTICES, capacityOf, createCompany, createRng, defaultDecisions, equityOf, generateEnvironment,
   initialEnvironment, periodSeed, sanitizeDecisions, simulatePeriod,
 } from '../src/engine.js';
 
@@ -17,17 +17,29 @@ function randomDecisions(rng) {
   return d;
 }
 
-function play(periods, seed, decide) {
+function randomMoves(rng, env) {
+  const keys = ILLEGAL_PRACTICES.map((x) => x.key);
+  return {
+    acquisitionBid: env.acquisition && rng() < 0.5 ? env.acquisition.minBid * (1 + rng()) : 0,
+    illegal: keys.filter(() => rng() < 0.25),
+    reportTarget: rng() < 0.3 ? ['a', 'b', 'c', 'd'][Math.floor(rng() * 4)] : null,
+  };
+}
+
+function play(periods, seed, decide, move = () => ({})) {
   let companies = ['a', 'b', 'c', 'd'].map((id) => createCompany(id, id.toUpperCase()));
   let env = initialEnvironment();
   const rng = createRng(seed);
   const all = [];
   for (let p = 1; p <= periods; p++) {
     const decisions = Object.fromEntries(companies.map((c) => [c.id, decide(c, rng, p)]));
-    const res = simulatePeriod(companies, decisions, env, createRng(periodSeed(seed, p, 1)), p);
-    all.push(res);
+    const moves = Object.fromEntries(companies.map((c) => [c.id, move(c, rng, env, p)]));
+    const res = simulatePeriod(companies, decisions, env, createRng(periodSeed(seed, p, 1)), p, moves, {
+      finalPeriod: p === periods,
+    });
+    all.push({ ...res, env });
     companies = res.companies;
-    env = generateEnvironment(env, createRng(periodSeed(seed, p + 1, 2)));
+    env = generateEnvironment(env, createRng(periodSeed(seed, p + 1, 2)), p + 1);
   }
   return { companies, all };
 }
@@ -41,7 +53,7 @@ test('empresa inicial tem balanço fechado e valor patrimonial de R$ 10 por aç�
 
 test('ativo = passivo + PL e caixa fecha em todos os períodos, mesmo com decisões malucas', () => {
   for (let seed = 1; seed <= 25; seed++) {
-    const { all } = play(12, seed, (c, rng) => randomDecisions(rng));
+    const { all } = play(12, seed, (c, rng) => randomDecisions(rng), (c, rng, env) => randomMoves(rng, env));
     for (const res of all) {
       for (const r of Object.values(res.reports)) {
         const b = r.balance;
@@ -54,7 +66,8 @@ test('ativo = passivo + PL e caixa fecha em todos os períodos, mesmo com decis�
         assert.ok(r.stock.price > 0 && Number.isFinite(r.stock.price), 'cotação inválida');
         const inc = r.income;
         assert.ok(Math.abs(inc.revenue - inc.cogs - inc.marketing - inc.rnd - inc.admin - inc.carrying - inc.badDebt
-          - inc.depreciation + inc.financialIncome - inc.interest - inc.tax - inc.emergencyFee - inc.netIncome) < 1e-3, 'DRE não fecha');
+          - inc.depreciation - inc.legal + inc.financialIncome - inc.interest - inc.tax - inc.fines + inc.reward
+          - inc.emergencyFee - inc.netIncome) < 1e-3, 'DRE não fecha');
       }
     }
   }
@@ -96,4 +109,93 @@ test('falta de caixa gera empréstimo emergencial com multa', () => {
   assert.ok(r.cashflow.emergencyLoan > 0);
   assert.ok(r.income.emergencyFee > 0);
   assert.equal(r.balance.cash, 0);
+});
+
+test('leilão: maior lance acima do mínimo leva a empresa, paga o lance e registra ágio', () => {
+  const companies = ['a', 'b', 'c'].map((id) => createCompany(id, id));
+  const env = generateEnvironment(initialEnvironment(), createRng(1), 2);
+  env.acquisition = {
+    id: 'T2', name: 'Alvo', kind: 'Clientes', text: '', fixedAssets: 140_000, capacity: 2000,
+    customers: 2_000, brand: 50_000, quality: 0, minBid: 300_000,
+  };
+  const d = defaultDecisions();
+  const res = simulatePeriod(companies, { a: d, b: d, c: d }, env, createRng(9), 2, {
+    a: { acquisitionBid: 350_000 },
+    b: { acquisitionBid: 420_000 },
+    c: { acquisitionBid: 250_000 }, // abaixo do mínimo
+  });
+  assert.equal(res.market.acquisition.winnerId, 'b');
+  assert.equal(res.market.acquisition.price, 420_000);
+  assert.equal(res.market.acquisition.bidders, 2);
+  const b = res.companies.find((c) => c.id === 'b');
+  assert.equal(b.goodwill, 280_000);
+  assert.equal(b.acquiredCustomers, 2_000);
+  assert.equal(res.reports.b.cashflow.investing, -42_000 - 420_000);
+  assert.equal(res.reports.a.events.acquired, null);
+});
+
+test('clientes herdados aumentam a demanda de quem comprou', () => {
+  const companies = ['a', 'b'].map((id) => createCompany(id, id));
+  companies[0].acquiredCustomers = 3_000;
+  const d = defaultDecisions();
+  const res = simulatePeriod(companies, { a: d, b: d }, initialEnvironment(), createRng(4), 1);
+  assert.ok(res.reports.a.operations.captiveDemand > 2_500);
+  assert.ok(res.reports.a.operations.demand > res.reports.b.operations.demand + 2_000);
+});
+
+test('práticas ilegais dão ganho, acumulam exposição e geram multa e queda da ação quando descobertas', () => {
+  let caughtSomewhere = false;
+  for (let seed = 1; seed <= 40 && !caughtSomewhere; seed++) {
+    const { all } = play(8, seed, () => defaultDecisions(), (c) => (c.id === 'a' ? { illegal: ['taxEvasion', 'informalLabor'] } : {}));
+    for (const res of all) {
+      const ra = res.reports.a;
+      if (ra.events.scandals.length) {
+        caughtSomewhere = true;
+        assert.ok(ra.income.fines >= CONFIG.fixedFine);
+        for (const s of ra.events.scandals) assert.equal(ra.private.illegal[s.key].exposure, 0);
+      } else {
+        assert.equal(ra.income.tax, 0, 'sonegação zera o imposto');
+        assert.ok(ra.operations.unitCost < res.reports.b.operations.unitCost, 'trabalho informal barateia a produção');
+        assert.ok(ra.private.illegal.taxEvasion.exposure >= 0);
+      }
+    }
+  }
+  assert.ok(caughtSomewhere, 'em 40 partidas alguém deveria ter sido pego');
+});
+
+test('denúncia contra quem trapaceia aumenta a chance de punição e rende recompensa', () => {
+  let caughtReported = 0;
+  let caughtAlone = 0;
+  let rewards = 0;
+  for (let seed = 1; seed <= 300; seed++) {
+    const companies = ['a', 'b'].map((id) => createCompany(id, id));
+    const d = defaultDecisions();
+    const env = initialEnvironment();
+    const reported = simulatePeriod(companies, { a: d, b: d }, env, createRng(seed), 1, {
+      a: { illegal: ['illegalDumping'] }, b: { reportTarget: 'a' },
+    });
+    const alone = simulatePeriod(companies, { a: d, b: d }, env, createRng(seed), 1, {
+      a: { illegal: ['illegalDumping'] },
+    });
+    if (reported.reports.a.events.scandals.length) caughtReported++;
+    if (alone.reports.a.events.scandals.length) caughtAlone++;
+    if (reported.reports.b.income.reward > 0) {
+      rewards++;
+      assert.equal(reported.reports.a.events.scandals[0].reported, true);
+    }
+    assert.equal(reported.reports.b.income.legal, CONFIG.reportCost);
+  }
+  assert.ok(caughtReported > caughtAlone * 2, `${caughtReported} vs ${caughtAlone}`);
+  assert.equal(rewards, caughtReported);
+});
+
+test('empresa honesta denunciada não sofre nada; denúncia é arquivada', () => {
+  const companies = ['a', 'b'].map((id) => createCompany(id, id));
+  const d = defaultDecisions();
+  for (let seed = 1; seed <= 50; seed++) {
+    const res = simulatePeriod(companies, { a: d, b: d }, initialEnvironment(), createRng(seed), 1, { b: { reportTarget: 'a' } });
+    assert.equal(res.reports.a.events.scandals.length, 0);
+    assert.equal(res.reports.a.events.reportsReceived, 1);
+    assert.equal(res.reports.b.income.reward, 0);
+  }
 });

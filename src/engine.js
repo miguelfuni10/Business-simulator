@@ -40,6 +40,16 @@ export const CONFIG = Object.freeze({
   baselineMarketing: 50_000,
   baselineRnd: 30_000,
   cashYieldShare: 0.5, // caixa aplicado rende metade da taxa básica
+  acquisitionChance: 0.65, // chance de surgir uma empresa à venda em cada período (a partir do 2º)
+  customerChurn: 0.05, // clientes herdados de aquisições que se perdem por período
+  reportCost: 20_000, // custo jurídico de uma denúncia
+  reportReward: 60_000, // recompensa quando a denúncia leva a uma condenação
+  reportDetectionBoost: 0.3, // chance extra de detecção por denúncia recebida
+  fineMultiplier: 2, // multa = 2× o ganho ilícito acumulado + multa fixa
+  fixedFine: 50_000,
+  investigationPeriods: 3, // períodos sob investigação após ser pego (risco 1,5×)
+  accountingFraudBoost: 0.04, // lucro fictício: 4% da receita
+  finalAuditRisk: 0.25, // risco extra de detecção no último período (auditoria de encerramento)
 });
 
 const BASE_BRAND = CONFIG.baselineMarketing / (1 - CONFIG.brandRetention);
@@ -105,6 +115,78 @@ export const EVENTS = Object.freeze([
   { title: 'Pânico no mercado', text: 'Crise lá fora derruba as bolsas do mundo inteiro.', effects: { sentiment: -0.05, demand: -0.03 } },
 ]);
 
+// Práticas ilegais: ganho imediato, mas cada período em uso aumenta o risco de
+// ser descoberto. Ganhos não punidos continuam expostos mesmo depois de parar.
+export const ILLEGAL_PRACTICES = Object.freeze([
+  {
+    key: 'taxEvasion', label: 'Sonegação de impostos',
+    benefit: 'Não paga IR/CSLL neste período.',
+    risk: 'A Receita cruza dados: quanto mais tempo, maior o risco.',
+    baseRisk: 0.1, streakRisk: 0.05, shock: 0.15, reputationHit: 0.03,
+  },
+  {
+    key: 'informalLabor', label: 'Trabalho informal',
+    benefit: 'Mão de obra 30% mais barata.',
+    risk: 'Fiscalização do trabalho e ações trabalhistas; os clientes não gostam.',
+    baseRisk: 0.1, streakRisk: 0.05, shock: 0.15, reputationHit: 0.12,
+  },
+  {
+    key: 'illegalDumping', label: 'Descarte ilegal de resíduos',
+    benefit: 'Economiza R$ 3 por unidade produzida.',
+    risk: 'Crime ambiental: multa pesada e manchete negativa.',
+    baseRisk: 0.08, streakRisk: 0.05, shock: 0.15, reputationHit: 0.1,
+  },
+  {
+    key: 'falseAdvertising', label: 'Propaganda enganosa',
+    benefit: 'Cada real de marketing rende o dobro em força de marca.',
+    risk: 'Procon e concorrentes ficam de olho. Se pego, a marca perde 40%.',
+    baseRisk: 0.12, streakRisk: 0.05, shock: 0.1, reputationHit: 0.08, brandHit: 0.4,
+  },
+  {
+    key: 'espionage', label: 'Espionagem industrial',
+    benefit: 'Copia o equivalente a 30% do P&D médio dos concorrentes.',
+    risk: 'Ex-funcionários costumam falar.',
+    baseRisk: 0.08, streakRisk: 0.06, shock: 0.12, reputationHit: 0.05,
+  },
+  {
+    key: 'accountingFraud', label: 'Maquiagem contábil',
+    benefit: 'Os investidores enxergam um lucro maior (4% da receita) e a ação sobe.',
+    risk: 'Auditoria e CVM. Se descoberta, a ação desaba ~30%.',
+    baseRisk: 0.08, streakRisk: 0.07, shock: 0.3, reputationHit: 0.05,
+  },
+]);
+const PRACTICE_KEYS = new Set(ILLEGAL_PRACTICES.map((x) => x.key));
+const practiceByKey = Object.fromEntries(ILLEGAL_PRACTICES.map((x) => [x.key, x]));
+
+// Empresas que podem aparecer à venda. Valores são multiplicados por um fator aleatório.
+export const ACQUISITION_TARGETS = Object.freeze([
+  {
+    name: 'Fábrica Regional Paraná', kind: 'Capacidade',
+    text: 'Fábrica moderna e mão de obra treinada. Aumenta a capacidade a partir do próximo período.',
+    fixedAssets: 350_000, customers: 0, brand: 0, quality: 20_000, discount: 0.9,
+  },
+  {
+    name: 'Marca Sol Nascente', kind: 'Clientes e marca',
+    text: 'Marca regional querida, com clientela fiel. Traz clientes próprios e força de marca.',
+    fixedAssets: 140_000, customers: 2_500, brand: 80_000, quality: 0, discount: 0.9,
+  },
+  {
+    name: 'Startup InovaLab', kind: 'Tecnologia',
+    text: 'Laboratório com patentes que melhoram a qualidade do produto.',
+    fixedAssets: 35_000, customers: 0, brand: 10_000, quality: 170_000, discount: 0.85,
+  },
+  {
+    name: 'Distribuidora Rota Norte', kind: 'Clientes',
+    text: 'Rede de distribuição com carteira de clientes no Norte do país.',
+    fixedAssets: 70_000, customers: 1_800, brand: 20_000, quality: 0, discount: 0.9,
+  },
+  {
+    name: 'Concorrente em recuperação judicial', kind: 'Barganha',
+    text: 'Vendida às pressas: fábrica e alguns clientes, mas a marca está arranhada.',
+    fixedAssets: 420_000, customers: 1_200, brand: 0, quality: 0, discount: 0.65,
+  },
+]);
+
 export const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
 const round2 = (x) => Math.round(x * 100) / 100;
 const sum = (arr, f) => arr.reduce((s, x) => s + f(x), 0);
@@ -132,9 +214,13 @@ export function periodSeed(seed, period, salt) {
 
 export const capacityOf = (c) => Math.floor(c.fixedAssets / CONFIG.capitalPerUnit);
 
-export const equityOf = (c) => c.cash + c.receivables + c.inventoryValue + c.fixedAssets - c.debt;
+export const equityOf = (c) =>
+  c.cash + c.receivables + c.inventoryValue + c.fixedAssets + (c.goodwill || 0) - c.debt;
 
 export const creditLimitOf = (c) => Math.max(CONFIG.minCreditLimit, CONFIG.creditLimitToEquity * equityOf(c));
+
+/** Quanto a empresa consegue pagar numa aquisição: caixa, recebíveis e crédito disponível. */
+export const buyingPowerOf = (c) => Math.max(0, c.cash + c.receivables + Math.max(0, creditLimitOf(c) - c.debt));
 
 export function interestRateFor(debt, equity, baseRate) {
   const leverage = equity > 0 ? debt / equity : Infinity;
@@ -143,6 +229,11 @@ export function interestRateFor(debt, equity, baseRate) {
 
 export function defaultDecisions() {
   return Object.fromEntries(DECISIONS.map((d) => [d.key, d.default]));
+}
+
+/** Movimentos estratégicos opcionais (fora das 10 decisões): aquisição, bastidores e denúncia. */
+export function defaultMoves() {
+  return { acquisitionBid: 0, illegal: [], reportTarget: null };
 }
 
 export function createCompany(id, name) {
@@ -155,12 +246,17 @@ export function createCompany(id, name) {
     inventoryUnits: C.initialInventoryUnits,
     inventoryValue: C.initialInventoryUnits * C.initialUnitCost,
     fixedAssets: C.initialFixedAssets,
+    goodwill: 0,
     debt: C.initialDebt,
     shares: C.initialShares,
     price: C.initialPrice,
     brand: BASE_BRAND,
     quality: BASE_QUALITY,
     reputation: 1,
+    acquiredCustomers: 0,
+    acquisitions: [],
+    illegal: {},
+    investigation: 0,
     lossCarryforward: 0,
     lastAdjNI: 0,
     lastRevenue: C.baseDemandPerCompany * C.refPrice,
@@ -193,6 +289,34 @@ export function sanitizeDecisions(raw, company) {
   return out;
 }
 
+export function sanitizeMoves(raw, company, { allowIllegal = true, allowAcquisitions = true } = {}) {
+  const out = defaultMoves();
+  const bid = Math.round(Number(raw?.acquisitionBid));
+  if (allowAcquisitions && Number.isFinite(bid) && bid > 0) {
+    out.acquisitionBid = company ? Math.min(bid, Math.round(buyingPowerOf(company))) : bid;
+  }
+  if (allowIllegal) {
+    const list = Array.isArray(raw?.illegal) ? raw.illegal : [];
+    out.illegal = [...new Set(list.filter((k) => PRACTICE_KEYS.has(k)))];
+    if (typeof raw?.reportTarget === 'string' && raw.reportTarget && raw.reportTarget !== company?.id) {
+      out.reportTarget = raw.reportTarget.slice(0, 40);
+    }
+  }
+  return out;
+}
+
+/** Probabilidade de uma prática ser descoberta neste período (sem contar denúncias). */
+export function detectionRisk(company, key, activeNow) {
+  const pr = practiceByKey[key];
+  const st = company.illegal?.[key] ?? { streak: 0, exposure: 0 };
+  let risk;
+  if (activeNow) risk = pr.baseRisk + pr.streakRisk * st.streak;
+  else if (st.exposure > 0) risk = pr.baseRisk * 0.4;
+  else return 0;
+  if (company.investigation > 0) risk *= 1.5;
+  return Math.min(0.9, risk);
+}
+
 export function initialEnvironment() {
   return {
     economy: 1,
@@ -204,13 +328,40 @@ export function initialEnvironment() {
       title: 'Abertura do mercado',
       text: 'Todas as empresas começam iguais: mesmo caixa, mesma fábrica, mesmo preço de ação (R$ 10). Que vença a melhor gestão!',
     },
+    acquisition: null,
   };
 }
 
-export function generateEnvironment(prev, rng) {
+function generateTarget(rng, period, previousName) {
+  const options = ACQUISITION_TARGETS.filter((x) => x.name !== previousName);
+  const t = options[Math.floor(rng() * options.length)];
+  const k = 0.8 + rng() * 0.45;
+  const fixedAssets = Math.round((t.fixedAssets * k) / 1000) * 1000;
+  const customers = Math.round((t.customers * k) / 50) * 50;
+  const brand = Math.round((t.brand * k) / 1000) * 1000;
+  const quality = Math.round((t.quality * k) / 1000) * 1000;
+  // Valor de referência: ativos + ~70 R$ por cliente/período + metade da marca/qualidade.
+  const fairValue = fixedAssets + customers * 70 + 0.5 * (brand + quality);
+  const minBid = Math.max(fixedAssets, Math.round((fairValue * t.discount) / 10_000) * 10_000);
+  return {
+    id: `T${period}`,
+    name: t.name,
+    kind: t.kind,
+    text: t.text,
+    fixedAssets,
+    capacity: Math.floor(fixedAssets / CONFIG.capitalPerUnit),
+    customers,
+    brand,
+    quality,
+    minBid,
+  };
+}
+
+export function generateEnvironment(prev, rng, period = 2, { allowAcquisitions = true } = {}) {
   const economy = clamp(1 + 0.6 * (prev.economy - 1) + gaussian(rng) * 0.04, 0.8, 1.2);
   const ev = rng() < 0.45 ? EVENTS[Math.floor(rng() * EVENTS.length)] : null;
   const e = ev?.effects ?? {};
+  const hasTarget = rng() < CONFIG.acquisitionChance;
   return {
     economy: round4(economy),
     demandMult: round4(economy * (1 + (e.demand || 0))),
@@ -218,6 +369,7 @@ export function generateEnvironment(prev, rng) {
     interestRate: round4(clamp(CONFIG.baseInterest + 0.6 * (prev.interestRate - CONFIG.baseInterest) + (e.interest || 0), 0.01, 0.07)),
     sentiment: e.sentiment || 0,
     event: ev ? { title: ev.title, text: ev.text } : null,
+    acquisition: allowAcquisitions && hasTarget ? generateTarget(rng, period, prev.acquisition?.name) : null,
   };
 }
 
@@ -225,38 +377,89 @@ function round4(x) {
   return Math.round(x * 10_000) / 10_000;
 }
 
-export function unitCostEstimate(units, salaryPct, materialMult) {
+export function unitCostEstimate(units, salaryPct, materialMult, illegal = []) {
   const C = CONFIG;
   const salary = salaryPct / 100;
   const scale = Math.pow(Math.max(units, 1000) / 10_000, -0.05);
   const morale = 0.6 + 0.4 * salary;
-  return C.materialCost * materialMult * scale + (C.laborCost * salary) / morale;
+  const labor = ((C.laborCost * salary) / morale) * (illegal.includes('informalLabor') ? 0.7 : 1);
+  const material = C.materialCost * materialMult * scale - (illegal.includes('illegalDumping') ? 3 : 0);
+  return material + labor;
 }
 
 /**
  * Simula um período contábil para todas as empresas que disputam o mesmo mercado.
+ * @param movesById movimentos opcionais por empresa (aquisição, práticas ilegais, denúncia)
+ * @param options.finalPeriod último período: auditoria de encerramento aumenta o risco de detecção
  * @returns {{ companies: object[], reports: Record<string, object>, market: object }}
  */
-export function simulatePeriod(companies, decisionsById, env, rng, period = 1) {
+export function simulatePeriod(companies, decisionsById, env, rng, period = 1, movesById = {}, { finalPeriod = false } = {}) {
   const C = CONFIG;
   const demandNoise = Math.exp(gaussian(rng) * 0.03);
   const marketMood = gaussian(rng) * 0.01 + (env.sentiment || 0);
+  const ids = new Set(companies.map((c) => c.id));
 
-  // 1) Mercado: atratividade relativa de cada empresa.
   const ps = companies.map((c) => {
     const d = sanitizeDecisions(decisionsById[c.id], c);
+    const mv = sanitizeMoves(movesById[c.id], c);
+    if (mv.reportTarget && !ids.has(mv.reportTarget)) mv.reportTarget = null;
     const capacity = capacityOf(c);
+    const falseAd = mv.illegal.includes('falseAdvertising');
     return {
       c,
       d,
+      mv,
       capacity,
       produced: Math.min(d.production, capacity),
       salary: d.salary / 100,
-      brand: c.brand * C.brandRetention + d.marketing,
+      brand: c.brand * C.brandRetention + d.marketing * (falseAd ? 2 : 1),
       quality: c.quality * C.qualityRetention + d.rnd,
     };
   });
   const n = ps.length;
+
+  // Espionagem: copia parte do P&D dos concorrentes.
+  for (const p of ps) {
+    p.stolen = 0;
+    if (p.mv.illegal.includes('espionage') && n > 1) {
+      p.stolen = (0.3 * sum(ps.filter((o) => o !== p), (o) => o.d.rnd)) / (n - 1);
+      p.quality += p.stolen;
+    }
+  }
+
+  // Denúncias e detecção das práticas ilegais.
+  const reportsAgainst = Object.fromEntries(companies.map((c) => [c.id, []]));
+  for (const p of ps) if (p.mv.reportTarget) reportsAgainst[p.mv.reportTarget].push(p.c.id);
+  for (const p of ps) {
+    p.caught = [];
+    const keys = new Set([...p.mv.illegal, ...Object.keys(p.c.illegal ?? {}).filter((k) => p.c.illegal[k].exposure > 0)]);
+    for (const key of [...keys].sort()) {
+      const active = p.mv.illegal.includes(key);
+      const risk = Math.min(0.95, detectionRisk(p.c, key, active)
+        + C.reportDetectionBoost * reportsAgainst[p.c.id].length
+        + (finalPeriod ? C.finalAuditRisk : 0));
+      if (rng() < risk) p.caught.push(key);
+    }
+  }
+  const reportSucceeded = (p) => Boolean(ps.find((x) => x.c.id === p.mv.reportTarget)?.caught.length);
+
+  // Leilão da empresa à venda: maior lance acima do mínimo leva (paga o próprio lance).
+  let acquisition = null;
+  const target = env.acquisition;
+  if (target) {
+    const bids = ps.filter((p) => p.mv.acquisitionBid >= target.minBid);
+    if (bids.length) {
+      const top = Math.max(...bids.map((p) => p.mv.acquisitionBid));
+      const tied = bids.filter((p) => p.mv.acquisitionBid === top);
+      const winner = tied[Math.floor(rng() * tied.length)];
+      acquisition = { target, winnerId: winner.c.id, price: top, bidders: bids.length };
+      winner.acquired = acquisition;
+    } else {
+      acquisition = { target, winnerId: null, price: 0, bidders: 0 };
+    }
+  }
+
+  // 1) Mercado: atratividade relativa de cada empresa.
   const avgPrice = sum(ps, (p) => p.d.price) / n;
   const avgBrand = sum(ps, (p) => p.brand) / n;
   const avgQuality = sum(ps, (p) => p.quality) / n;
@@ -278,7 +481,10 @@ export function simulatePeriod(companies, decisionsById, env, rng, period = 1) {
 
   const sumAttract = sum(ps, (p) => p.attract);
   for (const p of ps) {
-    p.demand = (totalDemand * p.attract) / sumAttract;
+    // Clientes herdados de aquisições formam uma base cativa (sensível ao preço e à reputação).
+    p.captive = (p.c.acquiredCustomers || 0) * env.demandMult * demandNoise *
+      Math.pow(p.d.price / avgPrice, -1.5) * p.c.reputation;
+    p.demand = (totalDemand * p.attract) / sumAttract + p.captive;
     p.available = p.c.inventoryUnits + p.produced;
     p.sales = Math.min(p.demand, p.available);
   }
@@ -302,7 +508,7 @@ export function simulatePeriod(companies, decisionsById, env, rng, period = 1) {
   // 2) Contabilidade de cada empresa.
   const reports = {};
   const next = ps.map((p) => {
-    const { c, d } = p;
+    const { c, d, mv } = p;
     const t = C.taxRate;
     const equity0 = equityOf(c);
 
@@ -316,7 +522,8 @@ export function simulatePeriod(companies, decisionsById, env, rng, period = 1) {
     const interestRate = interestRateFor(debtForInterest, equity0 + issueProceeds, env.interestRate);
 
     // Produção e estoque (custo médio ponderado).
-    const unitCost = unitCostEstimate(p.produced, d.salary, env.materialMult);
+    const unitCost = unitCostEstimate(p.produced, d.salary, env.materialMult, mv.illegal);
+    const legalUnitCost = unitCostEstimate(p.produced, d.salary, env.materialMult);
     const productionCost = p.produced * unitCost;
     const totalUnits = c.inventoryUnits + p.produced;
     const avgCost = totalUnits > 0 ? (c.inventoryValue + productionCost) / totalUnits : unitCost;
@@ -336,8 +543,9 @@ export function simulatePeriod(companies, decisionsById, env, rng, period = 1) {
     const admin = C.adminFixed + C.adminSalaryLinked * p.salary;
     const carrying = endUnits * C.inventoryCarryCost;
     const depreciation = c.fixedAssets * C.depreciationRate;
+    const legal = mv.reportTarget ? C.reportCost : 0;
     const grossProfit = revenue - cogs;
-    const ebit = grossProfit - d.marketing - d.rnd - admin - carrying - badDebt - depreciation;
+    const ebit = grossProfit - d.marketing - d.rnd - admin - carrying - badDebt - depreciation - legal;
     const interest = debtForInterest * interestRate;
     const financialIncome = Math.max(0, c.cash) * env.interestRate * C.cashYieldShare;
     const ebt = ebit + financialIncome - interest;
@@ -351,11 +559,54 @@ export function simulatePeriod(companies, decisionsById, env, rng, period = 1) {
       lossCarryforward += -ebt;
     }
 
+    // Ganhos ilícitos deste período (base para multas futuras).
+    const gains = {};
+    for (const key of mv.illegal) {
+      if (key === 'taxEvasion') gains[key] = tax;
+      else if (key === 'informalLabor' || key === 'illegalDumping') {
+        const laborOnly = key === 'informalLabor'
+          ? unitCostEstimate(p.produced, d.salary, env.materialMult, ['informalLabor'])
+          : unitCostEstimate(p.produced, d.salary, env.materialMult, ['illegalDumping']);
+        gains[key] = p.produced * (legalUnitCost - laborOnly);
+      } else if (key === 'falseAdvertising') gains[key] = 0.5 * d.marketing;
+      else if (key === 'espionage') gains[key] = p.stolen;
+      else if (key === 'accountingFraud') gains[key] = C.accountingFraudBoost * revenue;
+    }
+    if (mv.illegal.includes('taxEvasion')) tax = 0;
+
+    // Multas pelas práticas descobertas e recompensa por denúncia.
+    const illegal = {};
+    for (const [key, st] of Object.entries(c.illegal ?? {})) illegal[key] = { ...st };
+    for (const key of mv.illegal) {
+      const st = illegal[key] ?? { streak: 0, exposure: 0 };
+      illegal[key] = { streak: st.streak + 1, exposure: st.exposure + gains[key] };
+    }
+    for (const key of Object.keys(illegal)) if (!mv.illegal.includes(key)) illegal[key].streak = 0;
+    const scandals = [];
+    let fines = 0;
+    let shock = 0;
+    let reputationHit = 0;
+    let brandAfter = p.brand;
+    for (const key of p.caught) {
+      const pr = practiceByKey[key];
+      const fine = C.fineMultiplier * illegal[key].exposure + C.fixedFine;
+      fines += fine;
+      shock += pr.shock;
+      reputationHit += pr.reputationHit;
+      if (pr.brandHit) brandAfter *= 1 - pr.brandHit;
+      scandals.push({ key, label: pr.label, fine, reported: reportsAgainst[c.id].length > 0 });
+      illegal[key] = { streak: 0, exposure: 0 };
+    }
+    const reward = mv.reportTarget && reportSucceeded(p) ? C.reportReward : 0;
+    const investigation = p.caught.length ? C.investigationPeriods : Math.max(0, (c.investigation || 0) - 1);
+
     // Caixa.
     const operatingBeforeFee =
-      collections + cashSales + financialIncome - productionCost - d.marketing - d.rnd - admin - carrying - interest - tax;
-    let cash = c.cash + loan + issueProceeds + operatingBeforeFee - d.capex;
-    const canPayDividends = equity0 + ebt - tax > 0;
+      collections + cashSales + financialIncome + reward - productionCost - d.marketing - d.rnd - admin - carrying
+      - interest - tax - legal - fines;
+    const acquisitionPrice = p.acquired ? p.acquired.price : 0;
+    let cash = c.cash + loan + issueProceeds + operatingBeforeFee - d.capex - acquisitionPrice;
+    const canPayDividends = equity0 + ebt - tax - fines > 0;
     const dividends = canPayDividends ? Math.min(d.dividends, Math.max(0, cash)) : 0;
     cash -= dividends;
     let buybackShares = 0;
@@ -373,41 +624,53 @@ export function simulatePeriod(companies, decisionsById, env, rng, period = 1) {
       emergencyFee = emergencyLoan * C.emergencyFeeRate;
       cash = 0;
     }
-    const netIncome = ebt - tax - emergencyFee;
+    const netIncome = ebt - tax - fines + reward - emergencyFee;
 
+    // Aquisição: ativos entram pelo valor justo da fábrica; o excedente pago vira ágio.
+    const acquiredFA = p.acquired ? p.acquired.target.fixedAssets : 0;
+    const goodwill = (c.goodwill || 0) + (p.acquired ? acquisitionPrice - acquiredFA : 0);
     const debt = c.debt + loan + emergencyLoan;
-    const fixedAssets = c.fixedAssets - depreciation + d.capex;
+    const fixedAssets = c.fixedAssets - depreciation + d.capex + acquiredFA;
     const sharesForDividend = c.shares + issuedShares;
     const shares = sharesForDividend - buybackShares;
     const equity = equity0 + netIncome - dividends + issueProceeds - buybackCost;
     const dividendsPerShare = dividends / sharesForDividend;
 
-    // Reputação: faltar produto irrita os clientes.
+    // Reputação: faltar produto irrita os clientes; escândalos também.
     const unmet = p.demand - p.sales;
     const unmetFrac = p.demand > 0 ? unmet / p.demand : 0;
-    const reputation = unmetFrac > 0.05
+    let reputation = unmetFrac > 0.05
       ? Math.max(0.75, c.reputation - unmetFrac * 0.4)
       : Math.min(1, c.reputation + 0.05);
+    reputation = Math.max(0.6, reputation - reputationHit);
 
     // Ação: lucro econômico (marca e P&D parcialmente tratados como investimento),
     // retorno sobre o patrimônio vs. custo de capital, crescimento e humor do mercado.
     const intangibleAmortization =
       (1 - C.brandRetention) * c.brand + (1 - C.qualityRetention) * c.quality;
-    const adjNI = netIncome + 0.5 * (1 - t) * (d.marketing + d.rnd - intangibleAmortization);
+    const fraudBoost = mv.illegal.includes('accountingFraud') && !p.caught.includes('accountingFraud')
+      ? C.accountingFraudBoost * revenue : 0;
+    // Multas e recompensas são eventos únicos: o mercado não as projeta para o futuro.
+    // Já o ganho de uma prática descoberta deixa de existir, então sai do lucro considerado.
+    const exposedGains = sum(p.caught, (key) => gains[key] ?? 0);
+    const adjNI = netIncome + fines - reward + fraudBoost - exposedGains
+      + 0.5 * (1 - t) * (d.marketing + d.rnd - intangibleAmortization);
     const smoothNI = 0.6 * adjNI + 0.4 * c.lastAdjNI;
     const bvps = equity / shares;
     const growth = clamp(revenue / Math.max(c.lastRevenue, 1) - 1, -0.3, 0.3);
     let roe = null;
-    let target;
+    let targetPrice;
     if (equity <= 0) {
-      target = 0.5;
+      targetPrice = 0.5;
     } else {
       const ke = C.costOfEquity + 0.01 * Math.max(0, debt / equity - 1);
       roe = smoothNI / equity;
       const factor = clamp(1 + (roe - ke) * C.valuationMultiplier, 0.25, 4) * (1 + 0.3 * growth);
-      target = bvps * factor;
+      targetPrice = bvps * factor;
     }
-    const price = round2(Math.max(0.1, (0.6 * target + 0.4 * c.price) * Math.exp(gaussian(rng) * 0.03 + marketMood)));
+    const scandalMult = Math.max(0.4, 1 - shock);
+    const price = round2(Math.max(0.1,
+      (0.6 * targetPrice + 0.4 * c.price) * Math.exp(gaussian(rng) * 0.03 + marketMood) * scandalMult));
     const cumDividendsPerShare = c.cumDividendsPerShare + dividendsPerShare;
     const tsr = (price + cumDividendsPerShare) / C.initialPrice - 1;
 
@@ -418,12 +681,17 @@ export function simulatePeriod(companies, decisionsById, env, rng, period = 1) {
       inventoryUnits: endUnits,
       inventoryValue: endInventoryValue,
       fixedAssets,
+      goodwill,
       debt,
       shares,
       price,
-      brand: p.brand,
-      quality: p.quality,
+      brand: brandAfter + (p.acquired ? p.acquired.target.brand : 0),
+      quality: p.quality + (p.acquired ? p.acquired.target.quality : 0),
       reputation,
+      acquiredCustomers: (c.acquiredCustomers || 0) * (1 - C.customerChurn) + (p.acquired ? p.acquired.target.customers : 0),
+      acquisitions: p.acquired ? [...(c.acquisitions ?? []), { period, name: p.acquired.target.name, price: acquisitionPrice }] : (c.acquisitions ?? []),
+      illegal,
+      investigation,
       lossCarryforward,
       lastAdjNI: adjNI,
       lastRevenue: revenue,
@@ -432,7 +700,7 @@ export function simulatePeriod(companies, decisionsById, env, rng, period = 1) {
       equity,
     };
 
-    const totalAssets = cash + newReceivables + endInventoryValue + fixedAssets;
+    const totalAssets = cash + newReceivables + endInventoryValue + fixedAssets + goodwill;
     const operating = operatingBeforeFee - emergencyFee;
     reports[c.id] = {
       period,
@@ -444,21 +712,22 @@ export function simulatePeriod(companies, decisionsById, env, rng, period = 1) {
         utilization: p.capacity > 0 ? p.produced / p.capacity : 0,
         unitCost,
         demand: p.demand,
+        captiveDemand: Math.round(p.captive),
         sales: p.sales,
         unmet,
         inventoryUnits: endUnits,
         marketShare: company.marketShare,
         reputation,
-        brandIndex: p.brand / BASE_BRAND,
-        qualityIndex: p.quality / BASE_QUALITY,
+        brandIndex: company.brand / BASE_BRAND,
+        qualityIndex: company.quality / BASE_QUALITY,
         nextCapacity: capacityOf(company),
       },
       income: {
         revenue, cogs, grossProfit, marketing: d.marketing, rnd: d.rnd, admin, carrying, badDebt,
-        depreciation, ebit, financialIncome, interest, ebt, tax, emergencyFee, netIncome,
+        depreciation, legal, ebit, financialIncome, interest, ebt, tax, fines, reward, emergencyFee, netIncome,
       },
       balance: {
-        cash, receivables: newReceivables, inventory: endInventoryValue, fixedAssets, totalAssets,
+        cash, receivables: newReceivables, inventory: endInventoryValue, fixedAssets, goodwill, totalAssets,
         debt, equity, totalLiabilitiesAndEquity: debt + equity,
       },
       cashflow: {
@@ -466,7 +735,7 @@ export function simulatePeriod(companies, decisionsById, env, rng, period = 1) {
         collections,
         cashSales,
         operating,
-        investing: -d.capex,
+        investing: -d.capex - acquisitionPrice,
         financing: loan + issueProceeds - dividends - buybackCost + emergencyLoan,
         emergencyLoan,
         end: cash,
@@ -490,6 +759,20 @@ export function simulatePeriod(companies, decisionsById, env, rng, period = 1) {
         debtToEquity: equity > 0 ? debt / equity : null,
         economicRoe: roe,
       },
+      // Público: o que vira notícia.
+      events: {
+        acquired: p.acquired ? { name: p.acquired.target.name, price: acquisitionPrice } : null,
+        scandals,
+        reportsReceived: reportsAgainst[c.id].length,
+      },
+      // Privado: só a própria empresa enxerga.
+      private: {
+        moves: mv,
+        gains,
+        reward,
+        illegal,
+        investigation,
+      },
     };
     return company;
   });
@@ -498,10 +781,17 @@ export function simulatePeriod(companies, decisionsById, env, rng, period = 1) {
     companies: next,
     reports,
     market: {
-      totalDemand: Math.round(totalDemand),
+      totalDemand: Math.round(totalDemand + sum(ps, (p) => p.captive)),
       totalSales,
       avgPrice,
       realizedDemandMult: env.demandMult * demandNoise,
+      acquisition: acquisition && {
+        targetId: acquisition.target.id,
+        name: acquisition.target.name,
+        winnerId: acquisition.winnerId,
+        price: acquisition.price,
+        bidders: acquisition.bidders,
+      },
     },
   };
 }

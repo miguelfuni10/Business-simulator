@@ -69,11 +69,36 @@ test('visão do jogador não expõe tokens nem decisões pendentes de outros', (
   const { game, player: host } = createGame(never, { name: 'Ana', companyName: 'Alfa', totalPeriods: 3, mode: 'live' });
   const bia = joinGame(game, { name: 'Bia', companyName: 'Beta' });
   startGame(game, host);
-  submitDecisions(game, bia, { period: 1, decisions: { price: 99 } });
+  submitDecisions(game, bia, { period: 1, decisions: { price: 99 }, moves: { illegal: ['taxEvasion'], reportTarget: host.id } });
   const json = JSON.stringify(viewFor(game, host));
   assert.ok(!json.includes(host.token) && !json.includes(bia.token));
   assert.ok(!json.includes('"price":99'));
   assert.equal(viewFor(game, bia).myDecisions.price, 99);
+  assert.deepEqual(viewFor(game, bia).myMoves.illegal, ['taxEvasion']);
+
+  submitDecisions(game, host, { period: 1, decisions: {} }); // fecha o período
+  const hostView = viewFor(game, host);
+  assert.equal(hostView.history[0].reports[bia.id].private, undefined, 'práticas de outros ficam ocultas');
+  assert.ok(!JSON.stringify(hostView).includes('taxEvasion"]'));
+  assert.deepEqual(viewFor(game, bia).history[0].reports[bia.id].private.moves.illegal, ['taxEvasion']);
+});
+
+test('anfitrião pode desligar práticas ilegais e aquisições', () => {
+  const { game, player: host } = createGame(never, {
+    name: 'Ana', companyName: 'Alfa', totalPeriods: 8, mode: 'live', allowIllegal: false, allowAcquisitions: false,
+  });
+  addBot(game, host, 'agressiva');
+  startGame(game, host);
+  for (let p = 1; p <= 7; p++) {
+    submitDecisions(game, host, { period: p, decisions: {}, moves: { illegal: ['taxEvasion'], acquisitionBid: 9e6 } });
+    assert.equal(game.env.acquisition ?? null, null);
+  }
+  for (const h of game.history) {
+    for (const r of Object.values(h.reports)) {
+      assert.deepEqual(r.private.moves.illegal, []);
+      assert.equal(r.private.moves.acquisitionBid, 0);
+    }
+  }
 });
 
 test('API HTTP: criar, entrar, adicionar robô, começar e jogar', async () => {

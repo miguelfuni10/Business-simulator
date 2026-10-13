@@ -13,6 +13,8 @@
   --warn-text: #7a5300;
   --shadow: 0 1px 2px rgba(20, 30, 50, 0.06), 0 4px 16px rgba(20, 30, 50, 0.06);
   --radius: 12px;
+  --shady-bg: #f3f0fa;
+  --shady-border: #cfc3ec;
   color-scheme: light;
 }
 
@@ -31,6 +33,8 @@
     --warn-bg: #3a2f12;
     --warn-text: #f5d58a;
     --shadow: none;
+    --shady-bg: #1d1a2a;
+    --shady-border: #3b3358;
     color-scheme: dark;
   }
 }
@@ -177,6 +181,16 @@ tr.me td { background: var(--surface-2); }
 #toast.error { background: var(--bad); color: #fff; }
 
 .prose p, .prose li { max-width: 75ch; }
+
+.move { border-top: 1px solid var(--border); padding: 16px 0 4px; }
+.move .help { font-size: .85rem; color: var(--muted); margin: 0 0 8px; }
+.move .hint { font-size: .82rem; margin: 6px 0 0; }
+.shady { background: var(--shady-bg); border-radius: 10px; padding: 14px; margin-top: 12px; }
+.card.shady { border-color: var(--shady-border); }
+.check { display: flex; gap: 10px; align-items: flex-start; font-weight: 400; }
+.check input { width: auto; margin-top: 4px; flex: none; }
+.practice { padding: 8px 0; border-bottom: 1px dashed var(--border); margin: 0; }
+.banner { margin-top: 12px; padding: 12px 16px; }
 footer { color: var(--muted); font-size: .8rem; text-align: center; padding: 32px 0; }
 
 @media (max-width: 900px) {

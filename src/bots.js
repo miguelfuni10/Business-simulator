@@ -1,22 +1,26 @@
 // Concorrentes controlados pelo computador, para completar a mesa.
-import { CONFIG, capacityOf, clamp, creditLimitOf, defaultDecisions } from './engine.js';
+import { CONFIG, capacityOf, clamp, creditLimitOf, defaultDecisions, defaultMoves, equityOf } from './engine.js';
 
 export const BOT_PROFILES = Object.freeze({
   conservadora: {
     label: 'Conservadora', price: 62, buffer: 0.02, marketing: 40_000, rnd: 25_000,
     growth: 1.0, salary: 95, creditDays: 30, payout: 0.5,
+    acquisitionPremium: null, shady: 0,
   },
   equilibrada: {
     label: 'Equilibrada', price: 60, buffer: 0.06, marketing: 55_000, rnd: 35_000,
     growth: 1.15, salary: 100, creditDays: 30, payout: 0.25,
+    acquisitionPremium: 1.05, shady: 0,
   },
   agressiva: {
     label: 'Agressiva', price: 56, buffer: 0.1, marketing: 80_000, rnd: 30_000,
     growth: 1.5, salary: 105, creditDays: 60, payout: 0,
+    acquisitionPremium: 1.2, shady: 0.3,
   },
   inovadora: {
     label: 'Inovadora', price: 64, buffer: 0.05, marketing: 45_000, rnd: 70_000,
     growth: 1.2, salary: 115, creditDays: 30, payout: 0.1,
+    acquisitionPremium: 1.1, shady: 0, prefers: 'Tecnologia',
   },
 });
 
@@ -69,4 +73,33 @@ export function botDecisions(company, env, lastReport, profileKey, rng) {
   d.dividends = lastNI > 0 && company.cash > 250_000 ? Math.round((lastNI * P.payout) / 1000) * 1000 : 0;
   d.shares = 0;
   return d;
+}
+
+/** Movimentos estratégicos dos robôs: lances em aquisições e, para alguns, atalhos ilegais. */
+export function botMoves(company, env, profileKey, rng, { allowIllegal = true } = {}) {
+  const P = BOT_PROFILES[profileKey] ?? BOT_PROFILES.equilibrada;
+  const moves = defaultMoves();
+  const target = env.acquisition;
+  if (target && P.acquisitionPremium) {
+    const interested = !P.prefers || P.prefers === target.kind || rng() < 0.35;
+    const bid = Math.round((target.minBid * P.acquisitionPremium * (0.95 + rng() * 0.15)) / 10_000) * 10_000;
+    const room = Math.max(0, creditLimitOf(company) - company.debt);
+    const healthy = company.debt < 0.8 * equityOf(company);
+    if (interested && healthy && bid <= 0.5 * (Math.max(0, company.cash) + room)) moves.acquisitionBid = bid;
+  }
+  if (allowIllegal && P.shady > 0 && company.investigation === 0 && rng() < P.shady) {
+    moves.illegal = [rng() < 0.5 ? 'informalLabor' : 'illegalDumping'];
+  }
+  return moves;
+}
+
+/** Rodada completa de um robô: decisões + movimentos, já financiando o lance de aquisição. */
+export function botTurn(company, env, lastReport, profileKey, rng, options) {
+  const decisions = botDecisions(company, env, lastReport, profileKey, rng);
+  const moves = botMoves(company, env, profileKey, rng, options);
+  if (moves.acquisitionBid > 0) {
+    const room = Math.max(0, creditLimitOf(company) - company.debt);
+    decisions.loan = Math.max(decisions.loan, Math.min(room, moves.acquisitionBid));
+  }
+  return { decisions, moves };
 }

@@ -12,6 +12,7 @@ const S = {
   selPeriod: null,
   draft: null,
   draftPeriod: null,
+  moves: null,
   pollTimer: null,
   clockTimer: null,
 };
@@ -132,6 +133,8 @@ function renderHome(prefillCode = '') {
               ${Array.from({ length: 24 }, (_, h) => `<option value="${h}" ${h === 22 ? 'selected' : ''}>${String(h).padStart(2, '0')}:00</option>`).join('')}
             </select>
           </label>
+          <label class="check"><input type="checkbox" name="allowAcquisitions" checked> Aquisições de empresas (leilões)</label>
+          <label class="check"><input type="checkbox" name="allowIllegal" checked> Práticas ilegais e denúncias</label>
           <button class="btn primary block" type="submit">Criar partida</button>
         </form>
 
@@ -162,7 +165,12 @@ function renderHome(prefillCode = '') {
     e.preventDefault();
     const f = Object.fromEntries(new FormData(createForm));
     try {
-      const r = await api('POST', '/api/games', { ...f, tzOffset: new Date().getTimezoneOffset() });
+      const r = await api('POST', '/api/games', {
+        ...f,
+        allowAcquisitions: createForm.allowAcquisitions.checked,
+        allowIllegal: createForm.allowIllegal.checked,
+        tzOffset: new Date().getTimezoneOffset(),
+      });
       saveGame(r.code, r.token, f.companyName);
       enterGame(r.code);
     } catch (err) { toast(err.message, true); }
@@ -355,6 +363,8 @@ function renderLobby() {
             ${v.settings.mode === 'daily'
               ? `1 período por dia, fechando às ${String(v.settings.dailyCloseHour).padStart(2, '0')}:00`
               : 'ao vivo: o período fecha quando todos enviarem'}
+            <br>Aquisições: ${v.settings.allowAcquisitions === false ? 'desligadas' : 'ligadas'} ·
+            práticas ilegais: ${v.settings.allowIllegal === false ? 'desligadas' : 'ligadas'}
           </p>
         </section>
         <section class="card">
@@ -397,20 +407,23 @@ async function hostAction(action, body) {
 }
 
 // ---------- decisões ----------
-function unitCost(units, salaryPct, materialMult) {
+function unitCost(units, salaryPct, materialMult, illegal = []) {
   const C = S.view.rules.config;
   const salary = salaryPct / 100;
   const scale = Math.pow(Math.max(units, 1000) / 10000, -0.05);
-  return C.materialCost * materialMult * scale + (C.laborCost * salary) / (0.6 + 0.4 * salary);
+  const labor = ((C.laborCost * salary) / (0.6 + 0.4 * salary)) * (illegal.includes('informalLabor') ? 0.7 : 1);
+  return C.materialCost * materialMult * scale - (illegal.includes('illegalDumping') ? 3 : 0) + labor;
 }
 
-function estimate(d) {
+function estimate(d, mv = S.moves ?? emptyMoves()) {
   const v = S.view;
   const C = v.rules.config;
   const c = v.companies[v.me.id];
   const env = v.env;
   const produced = clamp(d.production, 0, c.capacity);
-  const uc = unitCost(produced, d.salary, env.materialMult);
+  const uc = unitCost(produced, d.salary, env.materialMult, mv.illegal);
+  const acquisition = env.acquisition && mv.acquisitionBid >= env.acquisition.minBid ? mv.acquisitionBid : 0;
+  const legal = mv.reportTarget ? C.reportCost : 0;
   const productionCost = produced * uc;
   const admin = C.adminFixed + C.adminSalaryLinked * d.salary / 100;
   const loan = d.loan > 0 ? Math.min(d.loan, Math.max(0, c.creditLimit - c.debt)) : -Math.min(-d.loan, c.debt, Math.max(0, c.cash));
@@ -423,13 +436,13 @@ function estimate(d) {
   const financialIncome = Math.max(0, c.cash) * env.interestRate * C.cashYieldShare;
   const depreciation = c.fixedAssets * C.depreciationRate;
   const cashBeforeSales = c.cash + c.receivables + loan + issue + financialIncome
-    - productionCost - d.marketing - d.rnd - admin - interest - d.capex - d.dividends - buyback;
+    - productionCost - d.marketing - d.rnd - admin - interest - d.capex - d.dividends - buyback - acquisition - legal;
   const available = c.inventoryUnits + produced;
   const cashShare = 1 - d.creditDays / C.periodDays;
   const margin = d.price - uc;
   const fixed = d.marketing + d.rnd + admin + depreciation + interest - financialIncome;
   return {
-    produced, uc, productionCost, admin, loan, issue, buyback, interest, rate, financialIncome, depreciation,
+    produced, uc, productionCost, admin, loan, acquisition, legal, issue, buyback, interest, rate, financialIncome, depreciation,
     cashBeforeSales, available, cashShare, margin,
     breakEven: margin > 0 ? fixed / margin : Infinity,
     revenueIfAll: available * d.price,
@@ -457,6 +470,7 @@ function renderDecisions(tab) {
   const v = S.view;
   if (!S.draft || S.draftPeriod !== v.period) {
     S.draft = { ...(v.myDecisions ?? v.lastDecisions) };
+    S.moves = v.myMoves ? { ...v.myMoves, illegal: [...v.myMoves.illegal] } : emptyMoves();
     S.draftPeriod = v.period;
   }
   const c = v.companies[v.me.id];
@@ -488,6 +502,7 @@ function renderDecisions(tab) {
             <p class="help">${esc(def.help)}</p>
             ${hints[def.key] ? `<p class="hint">${hints[def.key]}</p>` : ''}
           </div>`).join('')}
+        ${renderMovesSection()}
       </form>
       <aside class="side">
         <section class="card">
@@ -520,9 +535,18 @@ function renderDecisions(tab) {
   const form = $('#decision-form');
   form.addEventListener('input', (e) => {
     const t = e.target;
-    if (!t.name) return;
-    const val = Number(t.value);
-    S.draft[t.name] = Number.isFinite(val) ? val : 0;
+    if (t.name === 'acquisitionBid') {
+      S.moves.acquisitionBid = Math.max(0, Number(t.value) || 0);
+    } else if (t.name === 'illegal') {
+      S.moves.illegal = $$('input[name=illegal]:checked', form).map((x) => x.value);
+    } else if (t.name === 'reportTarget') {
+      S.moves.reportTarget = t.value || null;
+    } else if (t.name) {
+      const val = Number(t.value);
+      S.draft[t.name] = Number.isFinite(val) ? val : 0;
+    } else {
+      return;
+    }
     renderBudget();
   });
   form.addEventListener('submit', (e) => e.preventDefault());
@@ -530,9 +554,10 @@ function renderDecisions(tab) {
     const btn = $('#submit-decisions');
     btn.disabled = true;
     try {
-      await api('POST', `/api/games/${S.code}/decisions`, { token: S.token, period: v.period, decisions: S.draft });
+      await api('POST', `/api/games/${S.code}/decisions`, { token: S.token, period: v.period, decisions: S.draft, moves: S.moves });
       toast('Decisões enviadas!');
       S.view.myDecisions = { ...S.draft };
+      S.view.myMoves = { ...S.moves };
       await refresh();
       if (S.tab === 'decisions' && S.view.status === 'running' && S.view.period === v.period) render();
     } catch (err) {
@@ -542,6 +567,73 @@ function renderDecisions(tab) {
     }
   });
   renderBudget();
+}
+
+function emptyMoves() {
+  return { acquisitionBid: 0, illegal: [], reportTarget: null };
+}
+
+function renderMovesSection() {
+  const v = S.view;
+  const C = v.rules.config;
+  const mv = S.moves;
+  const parts = [];
+  const target = v.env.acquisition;
+  if (v.settings.allowAcquisitions !== false) {
+    parts.push(target ? `
+      <div class="move">
+        <h3>🏢 Empresa à venda: ${esc(target.name)} <span class="unit">(${esc(target.kind)})</span></h3>
+        <p class="help">${esc(target.text)}</p>
+        <div class="kv">
+          <span>Fábrica</span><span class="num">${money(target.fixedAssets)} · +${int(target.capacity)} un. de capacidade</span>
+          <span>Clientes próprios</span><span class="num">${int(target.customers)} un. por período</span>
+          <span>Marca / tecnologia</span><span class="num">+${money(target.brand)} / +${money(target.quality)}</span>
+          <span>Lance mínimo</span><span class="num"><b>${money(target.minBid)}</b></span>
+        </div>
+        <label for="m-bid" style="margin-top:12px">Seu lance (R$) <span class="unit">— deixe 0 para não participar</span>
+          <input id="m-bid" name="acquisitionBid" type="number" step="10000" min="0" value="${mv.acquisitionBid || 0}">
+        </label>
+        <p class="hint">Leilão fechado: ninguém vê os lances. O maior lance acima do mínimo leva e paga o próprio lance no fechamento;
+        o que passar do valor da fábrica vira ágio no balanço. Seu poder de compra (caixa + recebíveis + crédito livre):
+        <b>${money(v.myBuyingPower)}</b>. Se o caixa não cobrir, tome empréstimo na decisão 8.</p>
+      </div>`
+      : '<div class="move"><h3>🏢 Aquisições</h3><p class="muted">Nenhuma empresa à venda neste período. Fique de olho nos próximos.</p></div>');
+  }
+  if (v.settings.allowIllegal !== false) {
+    const me = v.myIllegal;
+    parts.push(`
+      <div class="move shady">
+        <h3>🕶️ Bastidores (práticas ilegais)</h3>
+        <p class="help">Retorno rápido, mas cada período em uso aumenta o risco de ser pego. Se descoberto: multa de
+        ${C.fineMultiplier}× tudo o que ganhou com a prática + ${money(C.fixedFine)}, queda da ação, reputação arranhada e
+        ${C.investigationPeriods} períodos sob investigação. Ganhos não punidos continuam expostos mesmo depois de parar.
+        Ninguém vê suas escolhas — a não ser que você seja pego.</p>
+        ${me.investigation > 0 ? `<div class="warn">Sua empresa está sob investigação por mais ${me.investigation} período(s): riscos 50% maiores.</div>` : ''}
+        ${v.period >= v.settings.totalPeriods ? `<div class="warn">Último período: auditoria de encerramento (+${pct(C.finalAuditRisk, 0)} de risco em tudo que estiver exposto).</div>` : ''}
+        ${v.rules.illegalPractices.map((pr) => {
+          const st = me.practices[pr.key];
+          return `
+          <label class="check practice">
+            <input type="checkbox" name="illegal" value="${pr.key}" ${mv.illegal.includes(pr.key) ? 'checked' : ''}>
+            <span><b>${esc(pr.label)}</b> — ${esc(pr.benefit)}<br>
+            <small>${esc(pr.risk)} Risco se usar agora: <b>${pct(st.riskIfActive, 0)}</b>${st.streak ? ` · em uso há ${st.streak} período(s)` : ''}${st.exposure > 0 ? ` · ganhos expostos: ${money(st.exposure)} (risco mesmo parando: ${pct(st.riskIfIdle, 0)})` : ''}</small></span>
+          </label>`;
+        }).join('')}
+        <p class="hint">Os riscos acima não incluem denúncias: cada denúncia recebida soma +${pct(C.reportDetectionBoost, 0)}.</p>
+      </div>
+      <div class="move">
+        <h3>🚨 Denunciar concorrente</h3>
+        <p class="help">Desconfia de alguém? A denúncia custa ${money(C.reportCost)} em advogados e aumenta em
+        ${pct(C.reportDetectionBoost, 0)} a chance de cada prática ilegal dele ser descoberta. Se ele for pego, você recebe
+        ${money(C.reportReward)} de recompensa. A denúncia é anônima; se a empresa for honesta, é arquivada.</p>
+        <select name="reportTarget" id="m-report">
+          <option value="">Não denunciar ninguém</option>
+          ${v.players.filter((p) => p.id !== v.me.id).map((p) => `<option value="${p.id}" ${mv.reportTarget === p.id ? 'selected' : ''}>${esc(p.companyName)}</option>`).join('')}
+        </select>
+      </div>`);
+  }
+  if (!parts.length) return '';
+  return `<h2 style="margin-top:28px">Movimentos estratégicos <span class="unit">(opcionais)</span></h2>${parts.join('')}`;
 }
 
 function renderBudget() {
@@ -573,6 +665,8 @@ function renderBudget() {
       <span>Juros (${pct(e.rate, 2)}) − rendimento</span><span class="num">−${money(e.interest - e.financialIncome)}</span>
       <span>Investimento na fábrica</span><span class="num">−${money(d.capex)}</span>
       <span>Dividendos</span><span class="num">−${money(d.dividends)}</span>
+      ${e.acquisition ? `<span>Aquisição (se vencer o leilão)</span><span class="num">−${money(e.acquisition)}</span>` : ''}
+      ${e.legal ? `<span>Advogados (denúncia)</span><span class="num">−${money(e.legal)}</span>` : ''}
       <span class="total">Caixa antes das vendas</span><span class="num total ${cls(e.cashBeforeSales)}">${money(e.cashBeforeSales)}</span>
     </div>
     <div class="kv" style="margin-top:10px">
@@ -616,6 +710,8 @@ function renderResults(tab) {
       </label>
     </div>
     ${isMe && h.autoSubmitted.includes(v.me.id) ? '<div class="warn">Você não enviou decisões neste período: foram repetidas as do período anterior.</div>' : ''}
+    ${eventBanners(r, companyId)}
+    ${r.private ? privateCard(r) : ''}
     <div class="grid-3" style="margin-top:16px">
       <section class="card">
         <h3>Ação</h3>
@@ -634,6 +730,7 @@ function renderResults(tab) {
         <h3>Operações</h3>
         <div class="kv">
           <span>Demanda</span><span class="num">${int(o.demand)} un.</span>
+          ${o.captiveDemand ? `<span>…de clientes adquiridos</span><span class="num">${int(o.captiveDemand)} un.</span>` : ''}
           <span>Vendas</span><span class="num">${int(o.sales)} un.</span>
           <span>Demanda não atendida</span><span class="num ${o.unmet > 0 ? 'bad' : ''}">${int(o.unmet)} un.</span>
           <span>Participação de mercado</span><span class="num">${pct(o.marketShare)}</span>
@@ -671,11 +768,14 @@ function renderResults(tab) {
           ${row('(−) Estocagem', neg(i.carrying))}
           ${row('(−) Inadimplência', neg(i.badDebt))}
           ${row('(−) Depreciação', neg(i.depreciation))}
+          ${i.legal ? row('(−) Despesas jurídicas', neg(i.legal)) : ''}
           ${row('= Lucro operacional (EBIT)', i.ebit, { strong: true, color: true })}
           ${row('(+) Rendimento do caixa', i.financialIncome)}
           ${row('(−) Juros', neg(i.interest))}
           ${row('= Lucro antes do IR', i.ebt, { strong: true })}
           ${row('(−) IR e CSLL (34%)', neg(i.tax))}
+          ${i.fines ? row('(−) Multas e acordos judiciais', neg(i.fines)) : ''}
+          ${i.reward ? row('(+) Recompensa por denúncia', i.reward) : ''}
           ${i.emergencyFee ? row('(−) Multa do empréstimo emergencial', neg(i.emergencyFee)) : ''}
           ${row('= Lucro líquido', i.netIncome, { strong: true, color: true })}
         </tbody></table>
@@ -687,6 +787,7 @@ function renderResults(tab) {
           ${row('Contas a receber', b.receivables)}
           ${row('Estoques', b.inventory)}
           ${row('Imobilizado (fábrica)', b.fixedAssets)}
+          ${b.goodwill ? row('Ágio de aquisições', b.goodwill) : ''}
           ${row('Total do ativo', b.totalAssets, { strong: true })}
           ${row('Empréstimos', b.debt)}
           ${row('Patrimônio líquido', b.equity, { color: true })}
@@ -714,6 +815,32 @@ function renderResults(tab) {
   $('#sel-period').addEventListener('change', (e) => { S.selPeriod = Number(e.target.value); render(); });
 }
 
+function eventBanners(r, companyId) {
+  const out = [];
+  const ev = r.events;
+  if (!ev) return '';
+  const name = esc(companyName(companyId));
+  if (ev.acquired) out.push(`🏢 ${name} comprou <b>${esc(ev.acquired.name)}</b> por ${money(ev.acquired.price)}.`);
+  for (const sc of ev.scandals) out.push(`🚔 ${name} foi pega por <b>${esc(sc.label)}</b>${sc.reported ? ' após denúncia' : ''}: multa de ${money(sc.fine)}.`);
+  if (ev.reportsReceived && !ev.scandals.length) out.push(`📨 ${name} recebeu ${ev.reportsReceived} denúncia(s) anônima(s), que foram arquivadas.`);
+  return out.map((x) => `<div class="card banner">${x}</div>`).join('');
+}
+
+function privateCard(r) {
+  const pv = r.private;
+  const prs = Object.fromEntries(S.view.rules.illegalPractices.map((x) => [x.key, x]));
+  const used = pv.moves.illegal;
+  const exposed = Object.entries(pv.illegal).filter(([, st]) => st.exposure > 0);
+  const items = [];
+  if (pv.moves.acquisitionBid) items.push(`Seu lance no leilão: ${money(pv.moves.acquisitionBid)}${r.events.acquired ? ' — vencedor!' : ' — não venceu.'}`);
+  if (used.length) items.push(`Práticas usadas: ${used.map((k) => `${esc(prs[k].label)} (ganho ≈ ${money(pv.gains[k])})`).join(', ')}.`);
+  if (exposed.length) items.push(`Ainda expostos: ${exposed.map(([k, st]) => `${esc(prs[k].label)} ${money(st.exposure)}`).join(', ')}.`);
+  if (pv.moves.reportTarget) items.push(`Você denunciou ${esc(companyName(pv.moves.reportTarget))}${pv.reward ? ` e recebeu ${money(pv.reward)} de recompensa!` : ' — nada foi encontrado.'}`);
+  if (pv.investigation > 0) items.push(`Sob investigação por mais ${pv.investigation} período(s).`);
+  if (!items.length) return '';
+  return `<section class="card shady" style="margin-top:16px"><h3>🔒 Só você vê</h3><ul>${items.map((x) => `<li>${x}</li>`).join('')}</ul></section>`;
+}
+
 function fmtDecision(def, value) {
   if (def.unit.startsWith('R$/')) return money2(value);
   if (def.unit.startsWith('R$')) return money(value);
@@ -734,6 +861,8 @@ function rankingRows() {
     })
     .sort((a, b) => b.tsr - a.tsr);
 }
+
+const scandalCount = (id) => S.view.history.reduce((n, h) => n + (h.reports[id].events?.scandals.length ?? 0), 0);
 
 function renderMarket(tab) {
   const v = S.view;
@@ -773,7 +902,7 @@ function renderMarket(tab) {
           ${rows.map((x, k) => `
             <tr class="${x.p.id === v.me.id ? 'me' : ''}">
               <td>${medals[k] ?? k + 1}</td>
-              <td><span class="dot" style="background:${companyColor(x.p.id)}"></span>${esc(x.p.companyName)} <small>${esc(x.p.name)}${x.p.isBot ? ' 🤖' : ''}</small></td>
+              <td><span class="dot" style="background:${companyColor(x.p.id)}"></span>${esc(x.p.companyName)} <small>${esc(x.p.name)}${x.p.isBot ? ' 🤖' : ''}</small>${scandalCount(x.p.id) ? ` <span title="Escândalos">🚔×${scandalCount(x.p.id)}</span>` : ''}${x.c.acquisitions.length ? ` <span title="Aquisições">🏢×${x.c.acquisitions.length}</span>` : ''}</td>
               <td class="num">${money2(x.c.price)}</td>
               <td class="num">${money2(x.c.cumDividendsPerShare)}</td>
               <td class="num ${cls(x.tsr)}"><b>${signPct(x.tsr)}</b></td>
@@ -882,8 +1011,17 @@ function headlines(h) {
     if (r.appliedFinance.issuedShares > 0) out.push(`🧾 <b>${esc(companyName(id))}</b> emitiu ${int(r.appliedFinance.issuedShares)} novas ações.`);
     if (r.income.netIncome < 0) out.push(`🔻 <b>${esc(companyName(id))}</b> registrou prejuízo de ${money(-r.income.netIncome)}.`);
   }
+  const acq = h.market.acquisition;
+  if (acq?.winnerId) out.unshift(`🏢 <b>${esc(companyName(acq.winnerId))}</b> venceu o leilão de <b>${esc(acq.name)}</b> por ${money(acq.price)} (${acq.bidders} lance${acq.bidders > 1 ? 's' : ''} válido${acq.bidders > 1 ? 's' : ''}).`);
+  else if (acq) out.push(`🏚️ Ninguém deu lance válido por <b>${esc(acq.name)}</b>.`);
+  for (const [id, r] of reps) {
+    for (const sc of r.events?.scandals ?? []) {
+      out.unshift(`🚔 ESCÂNDALO: <b>${esc(companyName(id))}</b> é pega por ${esc(sc.label.toLowerCase())}${sc.reported ? ' após denúncia anônima' : ''}. Multa de ${money(sc.fine)}.`);
+    }
+    if (r.events?.reportsReceived && !r.events.scandals.length) out.push(`📨 Denúncia contra <b>${esc(companyName(id))}</b> foi arquivada por falta de provas.`);
+  }
   if (h.autoSubmitted.length) out.push(`😴 Não enviaram decisões: ${h.autoSubmitted.map((id) => `<b>${esc(companyName(id))}</b>`).join(', ')}.`);
-  return out.slice(0, 14).map((x) => `<li>${x}</li>`).join('');
+  return out.slice(0, 18).map((x) => `<li>${x}</li>`).join('');
 }
 
 function renderNews(tab) {
@@ -931,6 +1069,24 @@ function renderHelp(tab) {
       Há também um pouco de humor do mercado (sorte). O ranking usa a <b>valorização total</b>: cotação + dividendos pagos.</p>
       <h3>As 10 decisões</h3>
       <ol>${v.rules.decisions.map((d) => `<li><b>${esc(d.label)}</b> (${esc(d.unit)}): ${esc(d.help)}</li>`).join('')}</ol>
+      ${v.settings.allowAcquisitions !== false ? `
+      <h3>Aquisições</h3>
+      <p>A partir do período 2, de vez em quando uma empresa é colocada à venda (fábrica, marca regional, startup, distribuidora…).
+      É um <b>leilão fechado</b>: cada CEO dá um lance secreto, o maior acima do mínimo leva e paga o próprio lance no fechamento do
+      período. A fábrica entra no imobilizado (capacidade extra já no período seguinte), clientes próprios viram demanda cativa
+      (perdendo ${pct(C.customerChurn, 0)} por período) e o valor pago acima da fábrica vira <b>ágio</b> no balanço. Pagar caro demais
+      derruba o retorno sobre o patrimônio — e a ação.</p>` : ''}
+      ${v.settings.allowIllegal !== false ? `
+      <h3>Bastidores: práticas ilegais e denúncias</h3>
+      <p>Seis atalhos ilegais dão ganho imediato (sonegar, trabalho informal, descarte ilegal, propaganda enganosa, espionagem e
+      maquiagem contábil). Cada um tem uma chance de ser descoberto a cada período, que cresce quanto mais tempo você usa.
+      O que você ganhou e não foi punido continua exposto mesmo depois de parar, e no último período há uma
+      <b>auditoria de encerramento</b> (+${pct(C.finalAuditRisk, 0)} de risco). Se for pego: multa de ${C.fineMultiplier}× o ganho
+      acumulado + ${money(C.fixedFine)}, queda da ação, reputação menor e ${C.investigationPeriods} períodos sob investigação.</p>
+      <p>Qualquer CEO pode <b>denunciar</b> um concorrente por período (custa ${money(C.reportCost)}). Cada denúncia aumenta em
+      ${pct(C.reportDetectionBoost, 0)} a chance de descoberta; se o denunciado for pego, o denunciante recebe ${money(C.reportReward)}.
+      As escolhas ilegais e as denúncias são secretas: só os escândalos viram notícia. Dica: analise os demonstrativos públicos —
+      imposto zerado ou custo unitário baixo demais podem ser pistas.</p>` : ''}
       <h3>Regras contábeis</h3>
       <ul>
         <li>Estoque avaliado ao custo médio. Estocagem: ${money2(C.inventoryCarryCost)} por unidade por período.</li>

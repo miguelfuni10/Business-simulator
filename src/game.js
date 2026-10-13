@@ -1,10 +1,11 @@
 // Regras da partida: sala, jogadores, envio de decisões e fechamento de períodos.
 import crypto from 'node:crypto';
 import {
-  CONFIG, DECISIONS, capacityOf, createCompany, createRng, creditLimitOf, defaultDecisions, equityOf,
-  generateEnvironment, initialEnvironment, interestRateFor, periodSeed, sanitizeDecisions, simulatePeriod,
+  ACQUISITION_TARGETS, CONFIG, DECISIONS, ILLEGAL_PRACTICES, buyingPowerOf, capacityOf, createCompany, createRng,
+  creditLimitOf, defaultDecisions, defaultMoves, detectionRisk, equityOf, generateEnvironment, initialEnvironment,
+  interestRateFor, periodSeed, sanitizeDecisions, sanitizeMoves, simulatePeriod,
 } from './engine.js';
-import { BOT_COMPANY_NAMES, BOT_PROFILES, botDecisions } from './bots.js';
+import { BOT_COMPANY_NAMES, BOT_PROFILES, botTurn } from './bots.js';
 
 export const MAX_PLAYERS = 12;
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
@@ -80,6 +81,8 @@ export function createGame(exists, input, now = Date.now()) {
       mode,
       dailyCloseHour: mode === 'daily' ? dailyCloseHour : null,
       tzOffset: Math.round(Number(input.tzOffset) || 0),
+      allowAcquisitions: input.allowAcquisitions !== false && input.allowAcquisitions !== 'false',
+      allowIllegal: input.allowIllegal !== false && input.allowIllegal !== 'false',
     },
     period: 0,
     env: null,
@@ -160,7 +163,11 @@ export function startGame(game, player, now = Date.now()) {
 export function submitDecisions(game, player, raw, now = Date.now()) {
   if (game.status !== 'running') throw new GameError(400, 'A partida não está em andamento.');
   if (Number(raw?.period) !== game.period) throw new GameError(409, 'O período já foi fechado. Recarregue a página.');
-  game.pending[player.id] = sanitizeDecisions(raw?.decisions, game.companies[player.id]);
+  const company = game.companies[player.id];
+  game.pending[player.id] = {
+    decisions: sanitizeDecisions(raw?.decisions, company),
+    moves: sanitizeMoves(raw?.moves, company, game.settings),
+  };
   touch(game, now);
   const humans = game.players.filter((p) => !p.isBot);
   if (game.settings.mode === 'live' && humans.every((p) => game.pending[p.id])) closePeriod(game, now);
@@ -177,21 +184,29 @@ export function closePeriod(game, now = Date.now()) {
   const lastReports = game.history.at(-1)?.reports ?? {};
   const botRng = createRng(periodSeed(game.seed, game.period, 3));
   const decisions = {};
+  const moves = {};
   const autoSubmitted = [];
   for (const p of game.players) {
     const company = game.companies[p.id];
     if (p.isBot) {
-      decisions[p.id] = botDecisions(company, game.env, lastReports[p.id], p.botProfile, botRng);
+      ({ decisions: decisions[p.id], moves: moves[p.id] } = botTurn(
+        company, game.env, lastReports[p.id], p.botProfile, botRng, game.settings,
+      ));
     } else if (game.pending[p.id]) {
-      decisions[p.id] = game.pending[p.id];
+      decisions[p.id] = game.pending[p.id].decisions;
+      moves[p.id] = game.pending[p.id].moves;
     } else {
+      // Quem não envia repete as 10 decisões, mas nunca lances nem práticas ilegais.
       decisions[p.id] = game.lastDecisions[p.id] ?? defaultDecisions();
+      moves[p.id] = defaultMoves();
       autoSubmitted.push(p.id);
     }
   }
   const companies = game.players.map((p) => game.companies[p.id]);
   const rng = createRng(periodSeed(game.seed, game.period, 1));
-  const result = simulatePeriod(companies, decisions, game.env, rng, game.period);
+  const result = simulatePeriod(companies, decisions, game.env, rng, game.period, moves, {
+    finalPeriod: game.period >= game.settings.totalPeriods,
+  });
   for (const c of result.companies) game.companies[c.id] = c;
   for (const [id, report] of Object.entries(result.reports)) game.lastDecisions[id] = report.decisions;
   game.history.push({
@@ -208,7 +223,9 @@ export function closePeriod(game, now = Date.now()) {
     game.nextDeadline = null;
   } else {
     game.period += 1;
-    game.env = generateEnvironment(game.env, createRng(periodSeed(game.seed, game.period, 2)));
+    game.env = generateEnvironment(game.env, createRng(periodSeed(game.seed, game.period, 2)), game.period, {
+      allowAcquisitions: game.settings.allowAcquisitions !== false,
+    });
     game.nextDeadline = game.settings.mode === 'daily'
       ? nextDailyDeadline(game.settings.dailyCloseHour, game.settings.tzOffset, now)
       : null;
@@ -234,7 +251,11 @@ function companySnapshot(c) {
     inventoryUnits: c.inventoryUnits,
     inventoryValue: c.inventoryValue,
     fixedAssets: c.fixedAssets,
+    goodwill: c.goodwill || 0,
     capacity: capacityOf(c),
+    acquiredCustomers: c.acquiredCustomers || 0,
+    acquisitions: c.acquisitions ?? [],
+    underInvestigation: (c.investigation || 0) > 0,
     debt: c.debt,
     equity: equityOf(c),
     creditLimit: creditLimitOf(c),
@@ -268,17 +289,45 @@ export function viewFor(game, player) {
       botProfile: p.botProfile,
       submitted: p.isBot || Boolean(game.pending[p.id]),
     })),
-    rules: { config: CONFIG, decisions: DECISIONS, botProfiles: BOT_PROFILES },
-    history: game.history,
+    rules: {
+      config: CONFIG,
+      decisions: DECISIONS,
+      botProfiles: BOT_PROFILES,
+      illegalPractices: ILLEGAL_PRACTICES,
+      acquisitionTargets: ACQUISITION_TARGETS,
+    },
+    history: game.history.map((h) => ({
+      ...h,
+      reports: Object.fromEntries(Object.entries(h.reports).map(([id, r]) => {
+        if (id === me.id) return [id, r];
+        const { private: _hidden, ...pub } = r;
+        return [id, pub];
+      })),
+    })),
   };
   if (game.status !== 'lobby') {
     view.env = game.env;
     view.companies = Object.fromEntries(Object.values(game.companies).map((c) => [c.id, companySnapshot(c)]));
-    view.myDecisions = game.pending[me.id] ?? null;
+    view.myDecisions = game.pending[me.id]?.decisions ?? null;
+    view.myMoves = game.pending[me.id]?.moves ?? null;
     view.lastDecisions = game.lastDecisions[me.id] ?? defaultDecisions();
     const myCompany = game.companies[me.id];
     if (myCompany && game.env) {
       view.myInterestRate = interestRateFor(myCompany.debt, equityOf(myCompany), game.env.interestRate);
+      view.myBuyingPower = buyingPowerOf(myCompany);
+      view.myIllegal = {
+        investigation: myCompany.investigation || 0,
+        practices: Object.fromEntries(ILLEGAL_PRACTICES.map((pr) => {
+          const st = myCompany.illegal?.[pr.key] ?? { streak: 0, exposure: 0 };
+          const finalBoost = game.period >= game.settings.totalPeriods ? CONFIG.finalAuditRisk : 0;
+          return [pr.key, {
+            streak: st.streak,
+            exposure: st.exposure,
+            riskIfActive: Math.min(0.95, detectionRisk(myCompany, pr.key, true) + finalBoost),
+            riskIfIdle: st.exposure > 0 ? Math.min(0.95, detectionRisk(myCompany, pr.key, false) + finalBoost) : 0,
+          }];
+        })),
+      };
     }
   }
   return view;
