@@ -880,7 +880,10 @@ function renderMovesSection() {
         <h3>🚨 Denunciar concorrente</h3>
         <p class="help">Desconfia de alguém? A denúncia custa ${money(C.reportCost)} em advogados e aumenta em
         ${pct(C.reportDetectionBoost, 0)} a chance de cada prática ilegal dele ser descoberta. Se ele for pego, você recebe
-        ${money(C.reportReward)} de recompensa. A denúncia é anônima; se a empresa for honesta, é arquivada.</p>
+        ${money(C.reportReward)} de recompensa e continua anônimo.</p>
+        <p class="help"><b>Cuidado:</b> se a empresa for honesta, a denúncia é <b>caluniosa</b>: você paga
+        ${money(C.falseReportIndemnity)} de indenização a ela, perde reputação e seu nome sai nas notícias. Se ela
+        trapaceava mas escapou, a denúncia só é arquivada.</p>
         <select name="reportTarget" id="m-report">
           <option value="">Não denunciar ninguém</option>
           ${v.players.filter((p) => p.id !== v.me.id).map((p) => `<option value="${p.id}" ${mv.reportTarget === p.id ? 'selected' : ''}>${esc(p.companyName)}</option>`).join('')}
@@ -1046,6 +1049,8 @@ function renderResults(tab) {
           ${row('(−) IR e CSLL (34%)', neg(i.tax))}
           ${i.fines ? row('(−) Multas e acordos judiciais', neg(i.fines)) : ''}
           ${i.reward ? row('(+) Recompensa por denúncia', i.reward) : ''}
+          ${i.compensation ? row('(+) Indenização por denúncia caluniosa recebida', i.compensation) : ''}
+          ${i.slanderPaid ? row('(−) Indenização por denúncia caluniosa', neg(i.slanderPaid)) : ''}
           ${i.emergencyFee ? row('(−) Multa do empréstimo emergencial', neg(i.emergencyFee)) : ''}
           ${row('= Lucro líquido', i.netIncome, { strong: true, color: true })}
         </tbody></table>
@@ -1098,7 +1103,12 @@ function eventBanners(r, companyId) {
   const name = esc(companyName(companyId));
   if (ev.acquired) out.push(`🏢 ${name} comprou <b>${esc(ev.acquired.name)}</b> por ${money(ev.acquired.price)}.`);
   for (const sc of ev.scandals) out.push(`🚔 ${name} foi pega por <b>${esc(sc.label)}</b>${sc.reported ? ' após denúncia' : ''}: multa de ${money(sc.fine)}${sc.repeatOffender ? ' (reincidente: multa em dobro)' : ''}.`);
-  if (ev.reportsReceived && !ev.scandals.length) out.push(`📨 ${name} recebeu ${ev.reportsReceived} denúncia(s) anônima(s), que foram arquivadas.`);
+  if (ev.falseAccusers?.length) {
+    out.push(`⚖️ ${name} foi acusada sem provas por ${ev.falseAccusers.map((id) => `<b>${esc(companyName(id))}</b>`).join(', ')} e recebeu ${money(S.view.rules.config.falseReportIndemnity * ev.falseAccusers.length)} de indenização.`);
+  } else if (ev.reportsReceived && !ev.scandals.length) {
+    out.push(`📨 ${name} recebeu ${ev.reportsReceived} denúncia(s) anônima(s), arquivada(s) por falta de provas.`);
+  }
+  if (ev.falseAccusationAgainst) out.push(`⚖️ ${name} acusou <b>${esc(companyName(ev.falseAccusationAgainst))}</b>, que era honesta: denúncia caluniosa, ${money(S.view.rules.config.falseReportIndemnity)} de indenização e reputação arranhada.`);
   return out.map((x) => `<div class="card banner">${x}</div>`).join('');
 }
 
@@ -1111,7 +1121,12 @@ function privateCard(r) {
   if (pv.moves.acquisitionBid) items.push(`Seu lance no leilão: ${money(pv.moves.acquisitionBid)}${r.events.acquired ? ' — vencedor!' : ' — não venceu.'}`);
   if (used.length) items.push(`Práticas usadas: ${used.map((k) => `${esc(prs[k].label)} (ganho ≈ ${money(pv.gains[k])})`).join(', ')}.`);
   if (exposed.length) items.push(`Ainda expostos: ${exposed.map(([k, st]) => `${esc(prs[k].label)} ${money(st.exposure)}`).join(', ')}.`);
-  if (pv.moves.reportTarget) items.push(`Você denunciou ${esc(companyName(pv.moves.reportTarget))}${pv.reward ? ` e recebeu ${money(pv.reward)} de recompensa!` : ' — nada foi encontrado.'}`);
+  if (pv.moves.reportTarget) {
+    const who = esc(companyName(pv.moves.reportTarget));
+    if (pv.reward) items.push(`Você denunciou ${who} e recebeu ${money(pv.reward)} de recompensa!`);
+    else if (r.events.falseAccusationAgainst) items.push(`Você denunciou ${who}, que era honesta: denúncia caluniosa, você pagou indenização e foi exposto.`);
+    else items.push(`Você denunciou ${who}: nada foi provado e a denúncia foi arquivada. Ela não estava limpa, mas escapou desta vez.`);
+  }
   if (pv.investigation > 0) items.push(`Sob investigação por mais ${pv.investigation} período(s).`);
   if (!items.length) return '';
   return `<section class="card shady" style="margin-top:16px"><h3>🔒 Só você vê</h3><ul>${items.map((x) => `<li>${x}</li>`).join('')}</ul></section>`;
@@ -1313,7 +1328,8 @@ function headlines(h) {
     for (const sc of r.events?.scandals ?? []) {
       out.unshift(`🚔 ESCÂNDALO: <b>${esc(companyName(id))}</b> é pega por ${esc(sc.label.toLowerCase())}${sc.reported ? ' após denúncia anônima' : ''}. Multa de ${money(sc.fine)}.`);
     }
-    if (r.events?.reportsReceived && !r.events.scandals.length) out.push(`📨 Denúncia contra <b>${esc(companyName(id))}</b> foi arquivada por falta de provas.`);
+    if (r.events?.falseAccusationAgainst) out.unshift(`⚖️ <b>${esc(companyName(id))}</b> acusou <b>${esc(companyName(r.events.falseAccusationAgainst))}</b> sem provas e terá de pagar ${money(v.rules.config.falseReportIndemnity)} de indenização.`);
+    else if (r.events?.reportsReceived && !r.events.scandals.length && !r.events.falseAccusers?.length) out.push(`📨 Denúncia contra <b>${esc(companyName(id))}</b> foi arquivada por falta de provas.`);
   }
   if (h.autoSubmitted.length) out.push(`😴 Não enviaram decisões: ${h.autoSubmitted.map((id) => `<b>${esc(companyName(id))}</b>`).join(', ')}.`);
   return out.slice(0, 18).map((x) => `<li>${x}</li>`).join('');
@@ -1382,7 +1398,9 @@ function renderHelp(tab) {
       (até ${pct(0.15, 0)}).</p>
       <p>Qualquer CEO pode <b>denunciar</b> um concorrente por período (custa ${money(C.reportCost)}). Cada denúncia aumenta em
       ${pct(C.reportDetectionBoost, 0)} a chance de descoberta; se o denunciado for pego, o denunciante recebe ${money(C.reportReward)}.
-      As escolhas ilegais e as denúncias são secretas: só os escândalos viram notícia. Dica: analise os demonstrativos públicos —
+      As escolhas ilegais e as denúncias são secretas: só os escândalos viram notícia. Mas denunciar uma empresa honesta
+      é <b>denúncia caluniosa</b>: o denunciante paga ${money(C.falseReportIndemnity)} de indenização ao denunciado, perde
+      reputação e tem o nome publicado. Dica: analise os demonstrativos públicos —
       imposto zerado ou custo unitário baixo demais podem ser pistas.</p>` : ''}
       <h3>Regras contábeis</h3>
       <ul>

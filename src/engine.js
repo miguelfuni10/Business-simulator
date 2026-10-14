@@ -44,6 +44,8 @@ export const CONFIG = Object.freeze({
   customerChurn: 0.05, // clientes herdados de aquisições que se perdem por período
   reportCost: 20_000, // custo jurídico de uma denúncia
   reportReward: 60_000, // recompensa quando a denúncia leva a uma condenação
+  falseReportIndemnity: 50_000, // denúncia contra empresa honesta: indenização paga ao denunciado
+  falseReportReputationHit: 0.05, // ...e o denunciante perde reputação (e é exposto nas notícias)
   reportDetectionBoost: 0.3, // chance extra de detecção por denúncia recebida
   fineMultiplier: 3, // multa = 3× o ganho ilícito acumulado + multa fixa
   fixedFine: 100_000,
@@ -447,6 +449,14 @@ export function simulatePeriod(companies, decisionsById, env, rng, period = 1, m
     }
   }
   const reportSucceeded = (p) => Boolean(ps.find((x) => x.c.id === p.mv.reportTarget)?.caught.length);
+  // Denúncia caluniosa: o denunciado não praticava nada nem tinha ganhos ilícitos expostos.
+  const isHonest = (p) => p.mv.illegal.length === 0
+    && !Object.values(p.c.illegal ?? {}).some((st) => st.exposure > 0);
+  const falseReporters = Object.fromEntries(companies.map((c) => [c.id, []]));
+  for (const p of ps) {
+    const target = p.mv.reportTarget && ps.find((x) => x.c.id === p.mv.reportTarget);
+    if (target && isHonest(target)) falseReporters[target.c.id].push(p.c.id);
+  }
 
   // Leilão da empresa à venda: maior lance acima do mínimo leva (paga o próprio lance).
   let acquisition = null;
@@ -604,6 +614,9 @@ export function simulatePeriod(companies, decisionsById, env, rng, period = 1, m
       illegal[key] = { streak: 0, exposure: 0 };
     }
     const reward = mv.reportTarget && reportSucceeded(p) ? C.reportReward : 0;
+    const falseReport = Boolean(mv.reportTarget && falseReporters[mv.reportTarget]?.includes(c.id));
+    const slanderPaid = falseReport ? C.falseReportIndemnity : 0;
+    const compensation = falseReporters[c.id].length * C.falseReportIndemnity;
     const investigation = p.caught.length ? C.investigationPeriods : Math.max(0, (c.investigation || 0) - 1);
     const convictions = (c.convictions || 0) + p.caught.length;
     // Empresa com histórico de condenações carrega um desconto permanente na bolsa.
@@ -611,7 +624,8 @@ export function simulatePeriod(companies, decisionsById, env, rng, period = 1, m
 
     // Caixa.
     const operatingBeforeFee =
-      collections + cashSales + financialIncome + reward - productionCost - d.marketing - d.rnd - admin - carrying
+      collections + cashSales + financialIncome + reward + compensation - slanderPaid
+      - productionCost - d.marketing - d.rnd - admin - carrying
       - interest - tax - legal - fines;
     const acquisitionPrice = p.acquired ? p.acquired.price : 0;
     let cash = c.cash + loan + issueProceeds + operatingBeforeFee - d.capex - acquisitionPrice;
@@ -633,7 +647,7 @@ export function simulatePeriod(companies, decisionsById, env, rng, period = 1, m
       emergencyFee = emergencyLoan * C.emergencyFeeRate;
       cash = 0;
     }
-    const netIncome = ebt - tax - fines + reward - emergencyFee;
+    const netIncome = ebt - tax - fines + reward + compensation - slanderPaid - emergencyFee;
 
     // Aquisição: ativos entram pelo valor justo da fábrica; o excedente pago vira ágio.
     const acquiredFA = p.acquired ? p.acquired.target.fixedAssets : 0;
@@ -651,7 +665,7 @@ export function simulatePeriod(companies, decisionsById, env, rng, period = 1, m
     let reputation = unmetFrac > 0.05
       ? Math.max(0.75, c.reputation - unmetFrac * 0.4)
       : Math.min(1, c.reputation + 0.05);
-    reputation = Math.max(0.6, reputation - reputationHit);
+    reputation = Math.max(0.6, reputation - reputationHit - (falseReport ? C.falseReportReputationHit : 0));
 
     // Ação: lucro econômico (marca e P&D parcialmente tratados como investimento),
     // retorno sobre o patrimônio vs. custo de capital, crescimento e humor do mercado.
@@ -662,7 +676,7 @@ export function simulatePeriod(companies, decisionsById, env, rng, period = 1, m
     // Multas e recompensas são eventos únicos: o mercado não as projeta para o futuro.
     // Já o ganho de uma prática descoberta deixa de existir, então sai do lucro considerado.
     const exposedGains = sum(p.caught, (key) => gains[key] ?? 0);
-    const adjNI = netIncome + fines - reward + fraudBoost - exposedGains
+    const adjNI = netIncome + fines - reward - compensation + slanderPaid + fraudBoost - exposedGains
       + 0.5 * (1 - t) * (d.marketing + d.rnd - intangibleAmortization);
     const smoothNI = 0.6 * adjNI + 0.4 * c.lastAdjNI;
     const bvps = equity / shares;
@@ -734,7 +748,8 @@ export function simulatePeriod(companies, decisionsById, env, rng, period = 1, m
       },
       income: {
         revenue, cogs, grossProfit, marketing: d.marketing, rnd: d.rnd, admin, carrying, badDebt,
-        depreciation, legal, ebit, financialIncome, interest, ebt, tax, fines, reward, emergencyFee, netIncome,
+        depreciation, legal, ebit, financialIncome, interest, ebt, tax, fines, reward, compensation, slanderPaid,
+        emergencyFee, netIncome,
       },
       balance: {
         cash, receivables: newReceivables, inventory: endInventoryValue, fixedAssets, goodwill, totalAssets,
@@ -774,6 +789,9 @@ export function simulatePeriod(companies, decisionsById, env, rng, period = 1, m
         acquired: p.acquired ? { name: p.acquired.target.name, price: acquisitionPrice } : null,
         scandals,
         reportsReceived: reportsAgainst[c.id].length,
+        // Denúncias caluniosas são públicas: quem acusou uma empresa honesta é exposto.
+        falseAccusers: falseReporters[c.id],
+        falseAccusationAgainst: falseReport ? mv.reportTarget : null,
         convictions,
       },
       // Privado: só a própria empresa enxerga.

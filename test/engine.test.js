@@ -67,7 +67,7 @@ test('ativo = passivo + PL e caixa fecha em todos os períodos, mesmo com decis�
         const inc = r.income;
         assert.ok(Math.abs(inc.revenue - inc.cogs - inc.marketing - inc.rnd - inc.admin - inc.carrying - inc.badDebt
           - inc.depreciation - inc.legal + inc.financialIncome - inc.interest - inc.tax - inc.fines + inc.reward
-          - inc.emergencyFee - inc.netIncome) < 1e-3, 'DRE não fecha');
+          + inc.compensation - inc.slanderPaid - inc.emergencyFee - inc.netIncome) < 1e-3, 'DRE não fecha');
       }
     }
   }
@@ -189,13 +189,35 @@ test('denúncia contra quem trapaceia aumenta a chance de punição e rende reco
   assert.equal(rewards, caughtReported);
 });
 
-test('empresa honesta denunciada não sofre nada; denúncia é arquivada', () => {
+test('denúncia contra empresa honesta é caluniosa: denunciante indeniza, perde reputação e é exposto', () => {
   const companies = ['a', 'b'].map((id) => createCompany(id, id));
   const d = defaultDecisions();
   for (let seed = 1; seed <= 50; seed++) {
     const res = simulatePeriod(companies, { a: d, b: d }, initialEnvironment(), createRng(seed), 1, { b: { reportTarget: 'a' } });
-    assert.equal(res.reports.a.events.scandals.length, 0);
-    assert.equal(res.reports.a.events.reportsReceived, 1);
-    assert.equal(res.reports.b.income.reward, 0);
+    const { a, b } = res.reports;
+    assert.equal(a.events.scandals.length, 0);
+    assert.equal(a.events.reportsReceived, 1);
+    assert.deepEqual(a.events.falseAccusers, ['b']);
+    assert.equal(b.events.falseAccusationAgainst, 'a');
+    assert.equal(a.income.compensation, CONFIG.falseReportIndemnity);
+    assert.equal(b.income.slanderPaid, CONFIG.falseReportIndemnity);
+    assert.equal(b.income.reward, 0);
+    assert.ok(b.operations.reputation < a.operations.reputation);
   }
+});
+
+test('denúncia contra quem trapaceia (mas escapou) só é arquivada, sem calúnia', () => {
+  const companies = ['a', 'b'].map((id) => createCompany(id, id));
+  const d = defaultDecisions();
+  let archived = 0;
+  for (let seed = 1; seed <= 100; seed++) {
+    const res = simulatePeriod(companies, { a: d, b: d }, initialEnvironment(), createRng(seed), 1, {
+      a: { illegal: ['taxEvasion'] }, b: { reportTarget: 'a' },
+    });
+    const { a, b } = res.reports;
+    assert.deepEqual(a.events.falseAccusers, []);
+    assert.equal(b.income.slanderPaid, 0);
+    if (!a.events.scandals.length) archived++;
+  }
+  assert.ok(archived > 0);
 });

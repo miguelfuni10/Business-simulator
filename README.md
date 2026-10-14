@@ -57,7 +57,9 @@ O anfitrião pode ligar ou desligar cada um ao criar a partida.
   investigação e um desconto permanente de 3% no valor da ação por condenação. As escolhas são secretas: só os
   escândalos viram notícia.
 - **Denúncia**: cada CEO pode denunciar um concorrente por período (R$ 20 mil em advogados). A denúncia soma +30% de chance
-  de descoberta; se o denunciado for pego, o denunciante recebe R$ 60 mil. Contra empresa honesta, é arquivada.
+  de descoberta; se o denunciado for pego, o denunciante recebe R$ 60 mil e segue anônimo. Se o denunciado era
+  honesto, a denúncia é **caluniosa**: o denunciante paga R$ 50 mil de indenização a ele, perde reputação e tem o nome
+  publicado nas notícias. Se o denunciado trapaceava mas escapou, a denúncia só é arquivada.
 
 Em simulações, trapacear de vez em quando custa em média de 13 a 32 pontos de valorização, embora às vezes renda a
 vitória; trapacear sempre quebra a empresa.
