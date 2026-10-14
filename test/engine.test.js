@@ -221,3 +221,28 @@ test('denúncia contra quem trapaceia (mas escapou) só é arquivada, sem calún
   }
   assert.ok(archived > 0);
 });
+
+test('balanço continua fechando com cartel, delação e multas em grupo', () => {
+  for (let seed = 1; seed <= 20; seed++) {
+    let companies = ['a', 'b', 'c'].map((id) => createCompany(id, id));
+    let env = initialEnvironment();
+    const rng = createRng(seed);
+    for (let p = 1; p <= 10; p++) {
+      const decisions = Object.fromEntries(companies.map((c) => [c.id, randomDecisions(rng)]));
+      const cartels = [{ id: 'k', members: ['a', 'b'], periods: p - 1, delators: rng() < 0.15 ? ['b'] : [] }];
+      const res = simulatePeriod(companies, decisions, env, createRng(periodSeed(seed, p, 1)), p, {}, { cartels });
+      for (const r of Object.values(res.reports)) {
+        assert.ok(Math.abs(r.balance.totalAssets - r.balance.totalLiabilitiesAndEquity) < 1e-3);
+      }
+      const exposed = res.market.cartels[0];
+      if (exposed?.byDelation) {
+        assert.equal(res.reports.b.events.leniency, true);
+        assert.ok(res.reports.a.events.scandals.some((s) => s.key === 'cartel'));
+        assert.ok(!res.reports.b.events.scandals.some((s) => s.key === 'cartel'));
+      }
+      assert.ok(!res.reports.c.events.scandals.some((s) => s.key === 'cartel'), 'quem está fora não é punido');
+      companies = res.companies;
+      env = generateEnvironment(env, createRng(periodSeed(seed, p + 1, 2)), p + 1);
+    }
+  }
+});

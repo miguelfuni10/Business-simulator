@@ -1,7 +1,8 @@
 // Servidor "de bolso": as mesmas rotas do server.js, rodando no próprio navegador.
 // Usado pela versão de teste (artefato), onde não há servidor nem rede.
 import {
-  GameError, addBot, authenticate, createGame, forceClose, joinGame, previewDecisions, removePlayer, runDeadlines,
+  GameError, addBot, authenticate, createGame, forceClose, joinGame, previewDecisions, recoverAccess, removePlayer,
+  runDeadlines,
   startGame, submitDecisions, viewFor,
 } from './game.js';
 
@@ -42,6 +43,9 @@ export function createLocalApi(storage = globalThis.localStorage, key = 'bsim:lo
     if (action === 'join') {
       const player = joinGame(game, body);
       result = { code: game.code, token: player.token };
+    } else if (action === 'recover') {
+      const player = recoverAccess(game, body.pin);
+      result = { code: game.code, token: player.token, companyName: player.companyName };
     } else {
       const player = authenticate(game, body.token);
       if (action === 'bots') addBot(game, player, body.profile);

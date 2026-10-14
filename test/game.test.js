@@ -261,3 +261,78 @@ test('projeção: estima o período sem sorte, sem mexer no jogo e sem usar deci
   const cheat = previewDecisions(game, host, { decisions: { price: 60 }, moves: { illegal: ['taxEvasion'] } });
   assert.ok(cheat.income.netIncome > a.income.netIncome, 'projeção mostra o ganho da trapaça (sem risco)');
 });
+
+test('código pessoal recupera o acesso de outro aparelho e bloqueia chutes', async () => {
+  const { recoverAccess } = await import('../src/game.js');
+  const { game, player: host } = createGame(never, { name: 'Ana', companyName: 'Alfa', totalPeriods: 3, mode: 'live' });
+  const bia = joinGame(game, { name: 'Bia', companyName: 'Beta' });
+  assert.match(bia.pin, /^[A-Z2-9]{6}$/);
+  assert.equal(recoverAccess(game, bia.pin.toLowerCase()).token, bia.token);
+  assert.equal(recoverAccess(game, `${bia.pin.slice(0, 3)}-${bia.pin.slice(3)}`).id, bia.id);
+  assert.equal(viewFor(game, host).me.pin, host.pin);
+  assert.ok(!JSON.stringify(viewFor(game, host)).includes(bia.pin), 'não mostra o código dos outros');
+  for (let i = 0; i < 10; i++) assert.throws(() => recoverAccess(game, 'ZZZZZZ', 1000), /incorreto/);
+  assert.throws(() => recoverAccess(game, bia.pin, 1000), /Muitas tentativas/);
+  assert.equal(recoverAccess(game, bia.pin, 1000 + 11 * 60 * 1000).id, bia.id, 'libera depois da janela');
+});
+
+function cartelGame() {
+  const { game, player: a } = createGame(never, { name: 'Ana', companyName: 'Alfa', totalPeriods: 10, mode: 'live' });
+  const b = joinGame(game, { name: 'Bia', companyName: 'Beta' });
+  const c = joinGame(game, { name: 'Caio', companyName: 'Gama' });
+  startGame(game, a);
+  const round = (moves = {}) => {
+    for (const p of [a, b, c]) submitDecisions(game, p, { period: game.period, decisions: { price: 70 }, moves: moves[p.id] ?? {} });
+  };
+  return { game, a, b, c, round };
+}
+
+test('cartel: proposta secreta, convite, aceite e acompanhamento dos parceiros', () => {
+  const { game, a, b, c, round } = cartelGame();
+  round({ [a.id]: { cartel: { type: 'propose', price: 70, invite: [b.id] } } });
+  assert.equal(game.cartels[0].status, 'forming');
+  assert.equal(viewFor(game, b).myCartel.invites[0].price, 70);
+  assert.deepEqual(viewFor(game, c).myCartel.invites, [], 'quem não foi convidado não vê');
+  assert.ok(!JSON.stringify(viewFor(game, c)).includes('"invited"'));
+
+  round({ [b.id]: { cartel: { type: 'accept', cartelId: game.cartels[0].id } } });
+  assert.equal(game.cartels[0].status, 'active');
+  const mine = viewFor(game, a).myCartel.membership;
+  assert.deepEqual(mine.members.map((m) => m.name), ['Alfa', 'Beta']);
+  assert.equal(mine.members[1].lastPrice, 70);
+});
+
+test('cartel: delação derruba os parceiros e dá imunidade ao delator', () => {
+  const { game, a, b, round } = cartelGame();
+  round({ [a.id]: { cartel: { type: 'propose', price: 70, invite: [b.id] } } });
+  round({ [b.id]: { cartel: { type: 'accept', cartelId: game.cartels[0].id } } });
+  round(); // um período de cartel ativo (se não for pego antes)
+  if (game.cartels[0].status !== 'active') return; // pego pelo CADE por sorte: cenário coberto em outro teste
+  round({ [b.id]: { cartel: { type: 'delate' } } });
+  const h = game.history.at(-1);
+  assert.equal(game.cartels[0].status, 'exposed');
+  assert.equal(game.cartels[0].byDelation, true);
+  assert.deepEqual(h.market.cartels[0].delators, [b.id]);
+  assert.equal(h.reports[b.id].events.leniency, true);
+  assert.equal(h.reports[b.id].income.fines, 0, 'delator sem multa');
+  const scandal = h.reports[a.id].events.scandals.find((s) => s.key === 'cartel');
+  assert.ok(scandal?.byDelation && scandal.fine > 0, 'parceiro delatado é multado');
+  assert.equal(game.companies[b.id].illegal.cartel.exposure, 0);
+});
+
+test('cartel: o CADE acaba pegando todos os membros juntos', () => {
+  let exposedTogether = 0;
+  for (let i = 0; i < 15 && !exposedTogether; i++) {
+    const { game, a, b, round } = cartelGame();
+    round({ [a.id]: { cartel: { type: 'propose', price: 70, invite: [b.id] } } });
+    round({ [b.id]: { cartel: { type: 'accept', cartelId: game.cartels[0].id } } });
+    while (game.status === 'running' && game.cartels[0].status === 'active') round();
+    if (game.cartels[0].status === 'exposed') {
+      const h = game.history.find((x) => x.market.cartels.length);
+      const caught = [a.id, b.id].filter((id) => h.reports[id].events.scandals.some((s) => s.key === 'cartel'));
+      assert.equal(caught.length, 2);
+      exposedTogether++;
+    }
+  }
+  assert.ok(exposedTogether > 0);
+});

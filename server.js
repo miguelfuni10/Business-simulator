@@ -5,7 +5,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openStore } from './src/store.js';
 import {
-  GameError, addBot, authenticate, createGame, forceClose, joinGame, previewDecisions, removePlayer, runDeadlines,
+  GameError, addBot, authenticate, createGame, forceClose, joinGame, previewDecisions, recoverAccess, removePlayer,
+  runDeadlines,
   startGame, submitDecisions, viewFor,
 } from './src/game.js';
 
@@ -40,6 +41,10 @@ export function createServer(store) {
     ['POST', /^\/api\/games\/([A-Za-z]{5})\/join$/, async (req, game) => {
       const player = joinGame(game, await readBody(req));
       return { code: game.code, token: player.token };
+    }],
+    ['POST', /^\/api\/games\/([A-Za-z]{5})\/recover$/, async (req, game) => {
+      const player = recoverAccess(game, (await readBody(req)).pin);
+      return { code: game.code, token: player.token, companyName: player.companyName };
     }],
     ['POST', /^\/api\/games\/([A-Za-z]{5})\/bots$/, async (req, game) => {
       const body = await readBody(req);

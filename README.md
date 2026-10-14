@@ -64,6 +64,27 @@ O anfitrião pode ligar ou desligar cada um ao criar a partida.
 Em simulações, trapacear de vez em quando custa em média de 13 a 32 pontos de valorização, embora às vezes renda a
 vitória; trapacear sempre quebra a empresa.
 
+### Cartel de preços e delação premiada
+
+Um CEO propõe em segredo um preço mínimo a outras empresas; o convite chega no período seguinte e, com dois ou mais
+membros, o cartel passa a valer. Os membros veem quem cumpriu o preço combinado. O CADE investiga o grupo todo (risco
+crescente e maior com denúncias); se pegar, todos são multados. Qualquer membro pode delatar: o cartel cai no mesmo
+fechamento, os parceiros são multados e o delator fica imune. Robôs nunca aceitam convites.
+
+### Acesso e lembretes
+
+- **Código pessoal**: cada CEO tem um código de 6 caracteres e um link de acesso que abrem a empresa em qualquer aparelho
+  (tentativas erradas são limitadas).
+- **Lembretes**: botão para avisar o grupo no WhatsApp com o prazo e o link; avisos do navegador quando o período fecha
+  e 15 minutos antes do prazo (com o jogo aberto em alguma aba); no modo diário, arquivo de agenda (.ics) com todos os
+  prazos e alarme 1 hora antes.
+
+### Raio-X do CEO
+
+Aba que decompõe a valorização de cada empresa (valor inicial + lucros por ação + emissão/recompra + prêmio do mercado =
+cotação + dividendos), mostra a DRE acumulada contra a média do mercado, melhor e pior período e lições automáticas
+sobre a gestão (caixa, rentabilidade vs. custo de capital, estoque, preço, escândalos, denúncias).
+
 ### Ajudas para decidir
 
 - **Como as coisas se afetam**: banner na tela de decisões com a cadeia decisão → clientes e custos → DRE → balanço →

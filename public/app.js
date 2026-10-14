@@ -125,10 +125,82 @@ function deadlineText(st) {
   return `${text}${early ? ' (ou antes, se todos enviarem)' : ''}`;
 }
 
+const formatPin = (pin) => `${pin.slice(0, 3)}-${pin.slice(3)}`;
+const gameLink = () => `${location.origin}${location.pathname}?jogo=${S.code}`;
+const accessLink = () => `${gameLink()}&pin=${S.view.me.pin}`;
+
+async function copyText(text, okMessage) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(okMessage);
+  } catch {
+    askConfirm(`Copie manualmente: ${text}`, 'OK');
+  }
+}
+
+// ---------- lembretes ----------
+const canNotify = () => !LOCAL && 'Notification' in window;
+const notifyOn = () => canNotify() && Notification.permission === 'granted' && localGet('bsim:notify') === '1';
+
+function localGet(key) {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+function localSet(key, value) {
+  try { localStorage.setItem(key, value); } catch { /* sem armazenamento */ }
+}
+
+function notify(title, body) {
+  if (!notifyOn()) return;
+  try { new Notification(title, { body, tag: `bsim-${S.code}` }); } catch { /* navegador recusou */ }
+}
+
+async function toggleNotifications() {
+  if (notifyOn()) {
+    localSet('bsim:notify', '0');
+    toast('Avisos desligados neste aparelho.');
+  } else {
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') return toast('O navegador não liberou os avisos. Libere nas configurações do site.', true);
+    localSet('bsim:notify', '1');
+    toast('Pronto! Você será avisado quando o período fechar e quando o prazo estiver acabando (com o jogo aberto em alguma aba).');
+  }
+  renderStatus();
+}
+
+function deadlineLabel(ts) {
+  return new Date(ts).toLocaleString('pt-BR', { weekday: 'long', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
+
+function whatsappLink() {
+  const v = S.view;
+  const when = v.nextDeadline ? `fecha ${deadlineLabel(v.nextDeadline)}` : 'está aberto';
+  const text = `📈 Simulador de Empresas — o período ${v.period} de ${v.settings.totalPeriods} ${when}. Mande suas decisões: ${gameLink()}`;
+  return `https://wa.me/?text=${encodeURIComponent(text)}`;
+}
+
+/** Arquivo de agenda com os prazos que faltam (modo diário), com alarme 1 hora antes. */
+function calendarFile() {
+  const v = S.view;
+  const pad = (n) => String(n).padStart(2, '0');
+  const stamp = (t) => { const d = new Date(t); return `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}00Z`; };
+  const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Simulador de Empresas//PT-BR', 'CALSCALE:GREGORIAN'];
+  for (let p = v.period, t = v.nextDeadline; p <= v.settings.totalPeriods; p++, t += 24 * 3600 * 1000) {
+    lines.push('BEGIN:VEVENT', `UID:${v.code}-${p}@simulador`, `DTSTAMP:${stamp(Date.now())}`, `DTSTART:${stamp(t - 30 * 60 * 1000)}`, `DTEND:${stamp(t)}`,
+      `SUMMARY:Simulador: fecha o período ${p} (${v.code})`, `DESCRIPTION:Mande suas decisões: ${gameLink()}`, `URL:${gameLink()}`,
+      'BEGIN:VALARM', 'TRIGGER:-PT1H', 'ACTION:DISPLAY', `DESCRIPTION:Faltam 1h30 para fechar o período ${p}`, 'END:VALARM', 'END:VEVENT');
+  }
+  lines.push('END:VCALENDAR');
+  if (S.icsUrl) URL.revokeObjectURL(S.icsUrl);
+  S.icsUrl = URL.createObjectURL(new Blob([lines.join('\r\n')], { type: 'text/calendar' }));
+  return S.icsUrl;
+}
+
 // ---------- início ----------
 function boot() {
   const params = new URLSearchParams(location.search);
   const code = params.get('jogo')?.toUpperCase();
+  const pin = params.get('pin');
+  if (code && pin) return recoverAndEnter(code, pin);
   if (code && savedGames()[code]) return enterGame(code);
   renderHome(code);
 }
@@ -201,6 +273,14 @@ function renderHome(prefillCode = '') {
             <label>Nome da sua empresa<input name="companyName" maxlength="30" required></label>
           </div>
           <button class="btn primary block" type="submit">Entrar</button>
+          <details class="recover">
+            <summary>Já está na partida e trocou de aparelho?</summary>
+            <div class="row" style="margin-top:10px">
+              <label>Código da partida<input id="recover-code" maxlength="5" value="${esc(prefillCode || '')}" style="text-transform:uppercase;letter-spacing:.15em" placeholder="ABCDE"></label>
+              <label>Seu código pessoal<input id="recover-pin" maxlength="7" style="text-transform:uppercase;letter-spacing:.12em" placeholder="ABC-123"></label>
+            </div>
+            <button class="btn block" type="button" id="recover-btn">Voltar para minha empresa</button>
+          </details>
         </form>
       </div>
 
@@ -249,6 +329,24 @@ function renderHome(prefillCode = '') {
     } catch (err) { toast(err.message, true); }
   });
   $$('[data-resume]').forEach((b) => b.addEventListener('click', () => enterGame(b.dataset.resume)));
+  $('#recover-btn').addEventListener('click', () => {
+    const code = $('#recover-code').value.trim().toUpperCase();
+    const pin = $('#recover-pin').value.trim();
+    if (!code || !pin) return toast('Preencha o código da partida e o seu código pessoal.', true);
+    recoverAndEnter(code, pin);
+  });
+}
+
+async function recoverAndEnter(code, pin) {
+  try {
+    const r = await api('POST', `/api/games/${encodeURIComponent(code)}/recover`, { pin });
+    saveGame(r.code, r.token, r.companyName);
+    toast(`Bem-vindo de volta, ${r.companyName}!`);
+    enterGame(r.code);
+  } catch (err) {
+    toast(err.message, true);
+    renderHome(code);
+  }
 }
 
 async function enterGame(code) {
@@ -296,6 +394,9 @@ function onViewChange(prev) {
   const v = S.view;
   const periodClosed = prev && prev.history.length < v.history.length;
   if (periodClosed) {
+    const lastClosed = v.history.at(-1).period;
+    notify(v.status === 'finished' ? 'Fim de jogo!' : `Período ${lastClosed} fechado`,
+      v.status === 'finished' ? 'Veja o ranking final e o seu Raio-X.' : 'Os resultados e o novo ranking já saíram.');
     S.selPeriod = null;
     S.selCompany = null;
     window.scrollTo(0, 0);
@@ -326,6 +427,7 @@ function render() {
     ...(v.status === 'running' ? [['decisions', 'Decisões']] : []),
     ['results', 'Resultados'],
     ['market', v.status === 'finished' ? 'Ranking final' : 'Mercado & ranking'],
+    ...(v.history.length ? [['xray', 'Raio-X do CEO']] : []),
     ['news', 'Notícias'],
     ['help', 'Como jogar'],
   ];
@@ -344,9 +446,14 @@ function render() {
       <div id="status"></div>
       <nav class="tabs">${tabs.map(([k, label]) => `<button data-tab="${k}" class="${S.tab === k ? 'active' : ''}">${label}</button>`).join('')}</nav>
       <main id="tab"></main>
-      <footer>Código da partida: <b>${esc(v.code)}</b> · <button class="link-btn" id="leave">Sair desta partida neste navegador</button></footer>
+      <footer>
+        Código da partida: <b>${esc(v.code)}</b>
+        ${!LOCAL && me.pin ? ` · Seu código pessoal: <b>${esc(formatPin(me.pin))}</b> <button class="link-btn" id="copy-access">copiar meu link de acesso</button>` : ''}
+        · <button class="link-btn" id="leave">Sair desta partida neste navegador</button>
+      </footer>
     </div>`;
   $('#home-link').addEventListener('click', (e) => { e.preventDefault(); renderHome(); });
+  $('#copy-access')?.addEventListener('click', () => copyText(accessLink(), 'Link de acesso copiado. Guarde-o: ele abre sua empresa em qualquer aparelho.'));
   $('#leave').addEventListener('click', async () => {
     if (await askConfirm('Remover o acesso a esta partida deste navegador? Você não conseguirá voltar sem o link de acesso.', 'Sair da partida')) {
       forgetGame(v.code);
@@ -361,6 +468,7 @@ function render() {
   else if (S.tab === 'results') renderResults(tab);
   else if (S.tab === 'market') renderMarket(tab);
   else if (S.tab === 'news') renderNews(tab);
+  else if (S.tab === 'xray') renderXray(tab);
   else renderHelp(tab);
 }
 
@@ -375,8 +483,13 @@ function renderStatus() {
     <div class="statusbar">
       <small>Decisões do período ${v.period}: <b>${done}/${humans.length}</b> CEOs enviaram</small>
       ${v.players.map((p) => `<span class="chip ${p.submitted ? 'ok' : ''}" title="${esc(p.name)}">${p.submitted ? '✓' : '…'} ${esc(p.companyName)}${p.isBot ? ' 🤖' : ''}</span>`).join('')}
-      ${v.me.isHost ? '<span class="spacer"></span><button class="btn small" id="force-close">Fechar período agora</button>' : ''}
+      <span class="spacer"></span>
+      ${!LOCAL ? `<a class="btn small" href="${whatsappLink()}" target="_blank" rel="noopener">Avisar o grupo no WhatsApp</a>` : ''}
+      ${canNotify() ? `<button class="btn small" id="notify-toggle">${notifyOn() ? '🔔 Avisos ligados' : '🔕 Ligar avisos'}</button>` : ''}
+      ${!LOCAL && v.settings.mode === 'daily' && v.nextDeadline ? `<a class="btn small" href="${calendarFile()}" download="simulador-${esc(v.code)}.ics">📅 Prazos na agenda</a>` : ''}
+      ${v.me.isHost ? '<button class="btn small" id="force-close">Fechar período agora</button>' : ''}
     </div>`;
+  $('#notify-toggle')?.addEventListener('click', toggleNotifications);
   $('#force-close')?.addEventListener('click', async () => {
     const missing = humans.length - done;
     const msg = missing > 0
@@ -396,6 +509,10 @@ function updateClock() {
   if (!el || !v?.nextDeadline) return;
   const ms = v.nextDeadline - (Date.now() + (S.clockSkew || 0));
   if (ms <= 0) { el.textContent = 'Fechando…'; return; }
+  if (ms < 15 * 60 * 1000 && !v.myDecisions && S.warnedPeriod !== v.period) {
+    S.warnedPeriod = v.period;
+    notify('Faltam 15 minutos!', `Você ainda não enviou as decisões do período ${v.period}.`);
+  }
   const h = Math.floor(ms / 3.6e6);
   const m = Math.floor((ms % 3.6e6) / 6e4);
   const s = Math.floor((ms % 6e4) / 1000);
@@ -421,6 +538,11 @@ function renderLobby() {
           <h2>Convide seus amigos</h2>
           <p class="muted">Envie o link ou o código. Cada um entra com o próprio nome e empresa.</p>
           <div class="code-big">${esc(v.code)}</div>
+          ${!LOCAL && v.me.pin ? `<div class="access-box">
+            <b>Seu código pessoal: ${esc(formatPin(v.me.pin))}</b>
+            <small class="muted">Use para entrar de outro aparelho. Não compartilhe: ele dá acesso à sua empresa.</small>
+            <button class="btn small" id="copy-access">Copiar meu link de acesso</button>
+          </div>` : ''}
           ${LOCAL ? '<p class="muted">Na versão de teste, todos jogam neste aparelho: adicione jogadores na barra acima e alterne entre eles.</p>' : `
           <div class="share-link" style="margin-top:12px">
             <input readonly value="${esc(link)}" id="share-url">
@@ -457,6 +579,7 @@ function renderLobby() {
       </div>
     </div>`;
   $('#home-link').addEventListener('click', (e) => { e.preventDefault(); renderHome(); });
+  $('#copy-access')?.addEventListener('click', () => copyText(accessLink(), 'Link de acesso copiado. Guarde-o: ele abre sua empresa em qualquer aparelho.'));
   $('#copy-link')?.addEventListener('click', async () => {
     try { await navigator.clipboard.writeText(link); toast('Link copiado!'); } catch { $('#share-url').select(); }
   });
@@ -601,7 +724,7 @@ function renderDecisions(tab) {
   const v = S.view;
   if (!S.draft || S.draftPeriod !== v.period) {
     S.draft = { ...(v.myDecisions ?? v.lastDecisions) };
-    S.moves = v.myMoves ? { ...v.myMoves, illegal: [...v.myMoves.illegal] } : emptyMoves();
+    S.moves = v.myMoves ? { ...v.myMoves, illegal: [...v.myMoves.illegal], cartel: v.myCartel?.pendingMove ?? null } : emptyMoves();
     S.draftPeriod = v.period;
   }
   const c = v.companies[v.me.id];
@@ -663,6 +786,8 @@ function renderDecisions(tab) {
       S.moves.illegal = $$('input[name=illegal]:checked', form).map((x) => x.value);
     } else if (t.name === 'reportTarget') {
       S.moves.reportTarget = t.value || null;
+    } else if (t.name?.startsWith('cartel')) {
+      S.moves.cartel = readCartelMove(form);
     } else if (t.name) {
       const val = Number(t.value);
       S.draft[t.name] = Number.isFinite(val) ? val : 0;
@@ -824,7 +949,80 @@ async function runPreview() {
 }
 
 function emptyMoves() {
-  return { acquisitionBid: 0, illegal: [], reportTarget: null };
+  return { acquisitionBid: 0, illegal: [], reportTarget: null, cartel: null };
+}
+
+// ---------- cartel ----------
+function cartelSection() {
+  const v = S.view;
+  const C = v.rules.config;
+  const info = v.myCartel;
+  if (!info) return '';
+  const mv = S.moves.cartel;
+  const choice = mv ? (mv.type === 'accept' ? `accept:${mv.cartelId}` : mv.type) : 'none';
+  const radio = (value, label, extra = '') => `
+    <label class="check"><input type="radio" name="cartel-action" value="${esc(value)}" ${choice === value ? 'checked' : ''}> <span>${label}${extra}</span></label>`;
+  const pr = v.rules.cartelPractice;
+  const intro = `<p class="help">${esc(pr.benefit)} ${esc(pr.risk)} Se o CADE pegar o cartel, <b>todos os membros</b> levam
+    multa (${C.fineMultiplier}× a vantagem indevida + ${money(C.fixedFine)}), tombo de ${pct(pr.shock, 0)} na ação e reputação arranhada.
+    Quem <b>delatar primeiro</b> sai sem multa nenhuma.</p>`;
+  if (info.membership) {
+    const m = info.membership;
+    const forming = m.status === 'forming';
+    return `
+      <div class="move shady cartel">
+        <h3>🤝 Seu cartel ${forming ? '(aguardando adesões)' : `(ativo há ${m.periods} período(s))`}</h3>
+        ${intro}
+        <p>Preço mínimo combinado: <b>${money2(m.price)}</b> · fundado por ${esc(m.founder)}</p>
+        <table class="cartel-table"><thead><tr><th>Membro</th><th class="num">Preço no último período</th><th></th></tr></thead><tbody>
+          ${m.members.map((x) => `<tr><td>${esc(x.name)}${x.id === v.me.id ? ' (você)' : ''}</td>
+            <td class="num">${x.lastPrice == null ? '—' : money2(x.lastPrice)}</td>
+            <td>${x.lastPrice == null || forming ? '' : x.lastPrice >= m.price ? '<span class="good">cumpriu</span>' : '<span class="bad">furou o acordo</span>'}</td></tr>`).join('')}
+        </tbody></table>
+        ${m.invited.length ? `<p class="hint">Convites pendentes: ${m.invited.map(esc).join(', ')}</p>` : ''}
+        <div class="cartel-options">
+          ${radio('none', 'Continuar no cartel')}
+          ${radio('leave', 'Sair do cartel', ' <small class="muted">— para de acumular vantagem, mas o que já ganhou continua exposto</small>')}
+          ${forming ? '' : radio('delate', '<b>Delatar o cartel</b>', ' <small class="muted">— derruba os parceiros neste fechamento e você fica imune</small>')}
+        </div>
+      </div>`;
+  }
+  const others = v.players.filter((p) => p.id !== v.me.id);
+  const proposing = mv?.type === 'propose';
+  return `
+    <div class="move shady cartel">
+      <h3>🤝 Cartel de preços</h3>
+      ${intro}
+      <div class="cartel-options">
+        ${radio('none', 'Não participar')}
+        ${info.invites.map((inv) => radio(`accept:${inv.id}`, `Aceitar o convite de <b>${esc(inv.founder)}</b>`,
+          ` <small class="muted">— preço mínimo ${money2(inv.price)} · membros: ${inv.members.map(esc).join(', ')}</small>`)).join('')}
+        ${radio('propose', 'Propor um cartel')}
+      </div>
+      <div class="cartel-propose" ${proposing ? '' : 'hidden'}>
+        <label for="cartel-price">Preço mínimo combinado (R$/un.)
+          <input id="cartel-price" name="cartel-price" type="number" min="10" max="200" step="1" value="${proposing ? mv.price : Math.max(65, Math.round(S.draft.price))}">
+        </label>
+        <p class="hint" style="margin:0 0 6px">Convidar (o convite chega em segredo no próximo período):</p>
+        ${others.map((p) => `<label class="check"><input type="checkbox" name="cartel-invite" value="${p.id}" ${proposing && mv.invite.includes(p.id) ? 'checked' : ''}> <span>${esc(p.companyName)}${p.isBot ? ' 🤖 <small class="muted">(robôs nunca aceitam)</small>' : ''}</span></label>`).join('')}
+      </div>
+    </div>`;
+}
+
+function readCartelMove(form) {
+  const choice = $('input[name=cartel-action]:checked', form)?.value ?? 'none';
+  const box = $('.cartel-propose', form);
+  if (box) box.hidden = choice !== 'propose';
+  if (choice === 'none') return null;
+  if (choice === 'propose') {
+    return {
+      type: 'propose',
+      price: Number($('#cartel-price', form)?.value) || 0,
+      invite: $$('input[name=cartel-invite]:checked', form).map((x) => x.value),
+    };
+  }
+  if (choice.startsWith('accept:')) return { type: 'accept', cartelId: choice.slice(7) };
+  return { type: choice };
 }
 
 function renderMovesSection() {
@@ -888,7 +1086,8 @@ function renderMovesSection() {
           <option value="">Não denunciar ninguém</option>
           ${v.players.filter((p) => p.id !== v.me.id).map((p) => `<option value="${p.id}" ${mv.reportTarget === p.id ? 'selected' : ''}>${esc(p.companyName)}</option>`).join('')}
         </select>
-      </div>`);
+      </div>
+      ${cartelSection()}`);
   }
   if (!parts.length) return '';
   return `<h2 style="margin-top:28px">Movimentos estratégicos <span class="unit">(opcionais)</span></h2>${parts.join('')}`;
@@ -1108,13 +1307,14 @@ function eventBanners(r, companyId) {
   } else if (ev.reportsReceived && !ev.scandals.length) {
     out.push(`📨 ${name} recebeu ${ev.reportsReceived} denúncia(s) anônima(s), arquivada(s) por falta de provas.`);
   }
+  if (ev.leniency) out.push(`🗣️ ${name} fez <b>delação premiada</b> do próprio cartel e ficou imune.`);
   if (ev.falseAccusationAgainst) out.push(`⚖️ ${name} acusou <b>${esc(companyName(ev.falseAccusationAgainst))}</b>, que era honesta: denúncia caluniosa, ${money(S.view.rules.config.falseReportIndemnity)} de indenização e reputação arranhada.`);
   return out.map((x) => `<div class="card banner">${x}</div>`).join('');
 }
 
 function privateCard(r) {
   const pv = r.private;
-  const prs = Object.fromEntries(S.view.rules.illegalPractices.map((x) => [x.key, x]));
+  const prs = Object.fromEntries([...S.view.rules.illegalPractices, S.view.rules.cartelPractice].map((x) => [x.key, x]));
   const used = pv.moves.illegal;
   const exposed = Object.entries(pv.illegal).filter(([, st]) => st.exposure > 0);
   const items = [];
@@ -1201,6 +1401,7 @@ function renderMarket(tab) {
               <span class="${cls(rows[k].tsr)}">${signPct(rows[k].tsr)}</span>
             </div>`).join('')}
         </div>
+        <button class="btn primary" id="see-xray" style="margin-top:12px">Ver o Raio-X da partida</button>
       </section>` : ''}
     <section class="card">
       <h2>Ranking — valorização da ação</h2>
@@ -1235,6 +1436,11 @@ function renderMarket(tab) {
       </section>
     </div>
     ${v.history.length ? comparisonTable() : ''}`;
+  wireSeeXray();
+}
+
+function wireSeeXray() {
+  $('#see-xray')?.addEventListener('click', () => { S.tab = 'xray'; S.selCompany = null; render(); window.scrollTo(0, 0); });
 }
 
 function comparisonTable() {
@@ -1300,6 +1506,194 @@ function lineChart(series, labels, fmt) {
     <div class="legend">${series.map((s) => `<span><span class="dot" style="background:${companyColor(s.id)}"></span>${esc(s.name)}</span>`).join('')}</div>`;
 }
 
+// ---------- raio-x do CEO ----------
+function xrayData(id) {
+  const v = S.view;
+  const C = v.rules.config;
+  const reps = v.history.map((h) => ({ r: h.reports[id], h }));
+  const last = reps.at(-1).r;
+  const sumOf = (f) => reps.reduce((acc, x) => acc + f(x.r, x.h), 0);
+  const avgOf = (f) => sumOf(f) / reps.length;
+  const eps = sumOf((r) => r.stock.eps);
+  const dividends = last.stock.cumDividendsPerShare;
+  const issue = last.stock.bvps - C.initialPrice - eps + dividends;
+  const premium = last.stock.price - last.stock.bvps;
+  const roes = reps.map((x) => x.r.indicators.roe).filter((x) => x != null);
+  return {
+    id,
+    tsr: last.stock.tsr,
+    price: last.stock.price,
+    bvps: last.stock.bvps,
+    eps, dividends, issue, premium,
+    total: last.stock.price + dividends,
+    roeAvg: roes.length ? roes.reduce((a, b) => a + b, 0) / roes.length : 0,
+    priceGap: avgOf((r, h) => r.decisions.price / h.market.avgPrice - 1),
+    shareAvg: avgOf((r) => r.operations.marketShare),
+    revenueGrowth: last.income.revenue / Math.max(1, reps[0].r.income.revenue) - 1,
+    acc: {
+      revenue: sumOf((r) => r.income.revenue),
+      cogs: sumOf((r) => r.income.cogs),
+      gross: sumOf((r) => r.income.grossProfit),
+      growth: sumOf((r) => r.income.marketing + r.income.rnd),
+      admin: sumOf((r) => r.income.admin),
+      depreciation: sumOf((r) => r.income.depreciation),
+      other: sumOf((r) => r.income.carrying + r.income.badDebt + (r.income.legal || 0)),
+      financial: sumOf((r) => r.income.financialIncome - r.income.interest),
+      tax: sumOf((r) => r.income.tax),
+      extraordinary: sumOf((r) => (r.income.reward || 0) + (r.income.compensation || 0) - (r.income.fines || 0)
+        - (r.income.slanderPaid || 0) - r.income.emergencyFee),
+      net: sumOf((r) => r.income.netIncome),
+    },
+    emergencies: reps.filter((x) => x.r.cashflow.emergencyLoan > 0).length,
+    emergencyFees: sumOf((r) => r.income.emergencyFee),
+    scandals: reps.flatMap((x) => (x.r.events?.scandals ?? []).map((sc) => ({ ...sc, period: x.h.period }))),
+    fines: sumOf((r) => r.income.fines || 0),
+    falseAccusations: reps.filter((x) => x.r.events?.falseAccusationAgainst).length,
+    rewards: sumOf((r) => r.income.reward || 0),
+    acquisitions: reps.filter((x) => x.r.events?.acquired).map((x) => ({ ...x.r.events.acquired, period: x.h.period })),
+    unmet: sumOf((r) => r.operations.unmet),
+    demand: sumOf((r) => r.operations.demand),
+    carrying: sumOf((r) => r.income.carrying),
+    capacityStart: reps[0].r.operations.capacity,
+    capacityEnd: last.operations.nextCapacity,
+    best: reps.reduce((a, b) => (b.r.stock.change > a.r.stock.change ? b : a)),
+    worst: reps.reduce((a, b) => (b.r.stock.change < a.r.stock.change ? b : a)),
+    debtToEquity: last.indicators.debtToEquity,
+  };
+}
+
+function xrayLessons(x) {
+  const C = S.view.rules.config;
+  const n = S.view.players.length;
+  const out = [];
+  if (x.roeAvg < C.costOfEquity) {
+    out.push(['bad', `Seu lucro rendeu em média ${pct(x.roeAvg)} do patrimônio por período, abaixo do custo de capital de ${pct(C.costOfEquity)}. Por isso o mercado pagou ${x.premium < 0 ? 'menos' : 'pouco mais'} que o valor patrimonial pela sua ação.`]);
+  } else {
+    out.push(['good', `Seu lucro rendeu em média ${pct(x.roeAvg)} do patrimônio por período, acima do custo de capital de ${pct(C.costOfEquity)}: é isso que faz o mercado pagar um prêmio pela ação.`]);
+  }
+  if (x.emergencies) out.push(['bad', `Você ficou sem caixa em ${x.emergencies} período(s) e pagou ${money(x.emergencyFees)} de multa no empréstimo emergencial. Use o orçamento e a projeção para planejar empréstimos antes.`]);
+  if (x.fines > 0) out.push(['bad', `As práticas ilegais descobertas custaram ${money(x.fines)} em multas, além do tombo na bolsa e da reputação (${x.scandals.map((sc) => sc.label.toLowerCase()).join(', ')}).`]);
+  if (x.falseAccusations) out.push(['bad', `Você fez ${x.falseAccusations} denúncia(s) caluniosa(s): pagou indenização e perdeu reputação.`]);
+  if (x.rewards) out.push(['good', `Suas denúncias certeiras renderam ${money(x.rewards)} em recompensas.`]);
+  if (x.demand > 0 && x.unmet / x.demand > 0.05) out.push(['bad', `Faltou produto para ${int(x.unmet)} clientes (${pct(x.unmet / x.demand, 0)} da sua demanda): vendas perdidas e reputação arranhada. Planeje produção e capacidade.`]);
+  if (x.carrying > 0.03 * x.acc.revenue) out.push(['bad', `Estoque parado custou ${money(x.carrying)} em estocagem. Produzir perto da demanda libera caixa.`]);
+  if (x.priceGap > 0.05 && x.shareAvg < 1 / n) out.push(['info', `Você cobrou em média ${pct(x.priceGap, 0)} acima do mercado e ficou com ${pct(x.shareAvg, 0)} das vendas: o preço alto afastou clientes.`]);
+  if (x.priceGap < -0.05) out.push(['info', `Você cobrou em média ${pct(-x.priceGap, 0)} abaixo do mercado e ficou com ${pct(x.shareAvg, 0)} das vendas. Confira se a margem compensou o volume.`]);
+  if (x.issue > 0.3) out.push(['good', `Suas operações com ações (recompra barata ou emissão cara) criaram ${money2(x.issue)} por ação.`]);
+  if (x.issue < -0.3) out.push(['bad', `Emitir ou recomprar ações no momento errado custou ${money2(-x.issue)} por ação.`]);
+  if (x.acquisitions.length) out.push(['info', `Você comprou ${x.acquisitions.map((a) => `${a.name} (${money(a.price)})`).join(', ')}. Aquisições pesam no caixa agora e rendem ao longo dos períodos.`]);
+  if (x.capacityEnd < x.capacityStart * 0.9) out.push(['info', `Sua fábrica encolheu de ${int(x.capacityStart)} para ${int(x.capacityEnd)} un.: o investimento não cobriu a depreciação.`]);
+  if (x.revenueGrowth > 0.1) out.push(['good', `Sua receita cresceu ${pct(x.revenueGrowth, 0)} do primeiro ao último período.`]);
+  return out.slice(0, 6);
+}
+
+function waterfall(x) {
+  const C = S.view.rules.config;
+  const steps = [
+    ['Valor inicial da ação', C.initialPrice, 'base'],
+    ['Lucros acumulados por ação', x.eps, 'delta'],
+    ['Emissão e recompra de ações', x.issue, 'delta'],
+    ['Prêmio (ou desconto) do mercado', x.premium, 'delta'],
+    ['Valor final por ação', x.total, 'base'],
+  ];
+  let run = 0;
+  const bars = steps.map(([label, value, kind]) => {
+    const from = kind === 'base' ? 0 : run;
+    const to = kind === 'base' ? value : run + value;
+    run = to;
+    return { label, value, kind, from, to };
+  });
+  const lo = Math.min(0, ...bars.flatMap((b) => [b.from, b.to]));
+  const hi = Math.max(...bars.flatMap((b) => [b.from, b.to]));
+  const scale = (val) => ((val - lo) / (hi - lo || 1)) * 100;
+  return `
+    <div class="waterfall">
+      ${bars.map((b) => `
+        <div class="wf-row ${b.kind}">
+          <span class="wf-label">${b.label}</span>
+          <span class="wf-track"><span class="wf-bar ${b.kind === 'base' ? 'base' : b.value >= 0 ? 'up' : 'down'}"
+            style="left:${scale(Math.min(b.from, b.to))}%;width:${Math.max(0.6, Math.abs(scale(b.to) - scale(b.from)))}%"></span></span>
+          <span class="wf-value num ${b.kind === 'delta' ? cls(b.value) : ''}">${b.kind === 'delta' && b.value >= 0.005 ? '+' : ''}${money2(Math.abs(b.value) < 0.005 ? 0 : b.value)}</span>
+        </div>`).join('')}
+    </div>`;
+}
+
+function renderXray(tab) {
+  const v = S.view;
+  const id = S.selCompany ?? v.me.id;
+  const x = xrayData(id);
+  const all = v.players.map((p) => ({ p, x: xrayData(p.id) })).sort((a, b) => b.x.tsr - a.x.tsr);
+  const avg = (f) => all.reduce((acc, it) => acc + f(it.x), 0) / all.length;
+  const rows = [
+    ['Receita', 'revenue'], ['(−) Custo dos produtos', 'cogs', -1], ['= Lucro bruto', 'gross', 1, true],
+    ['(−) Marketing e P&D', 'growth', -1], ['(−) Administração', 'admin', -1], ['(−) Depreciação', 'depreciation', -1],
+    ['(−) Estocagem, calotes e advogados', 'other', -1], ['(±) Resultado financeiro', 'financial', 1],
+    ['(−) Impostos', 'tax', -1], ['(±) Multas, indenizações e recompensas', 'extraordinary', 1], ['= Lucro líquido acumulado', 'net', 1, true],
+  ];
+  const isMe = id === v.me.id;
+  tab.innerHTML = `
+    <div class="card" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
+      <label style="margin:0;flex:1 1 220px">Empresa
+        <select id="xray-company">${v.players.map((p) => `<option value="${p.id}" ${p.id === id ? 'selected' : ''}>${esc(p.companyName)}${p.id === v.me.id ? ' (você)' : ''}</option>`).join('')}</select>
+      </label>
+      <p class="muted" style="margin:0;flex:2 1 300px">${v.status === 'finished' ? 'Resultado final da partida.' : `Parcial: até o período ${v.history.at(-1).period}.`} Usa só os dados publicados.</p>
+    </div>
+    <div class="grid-2" style="margin-top:16px">
+      <section class="card">
+        <h2>De onde veio a valorização</h2>
+        <p class="muted" style="margin-top:0">${esc(companyName(id))}: ${money2(C_initial())} → ${money2(x.total)} por ação
+          (cotação ${money2(x.price)} + dividendos ${money2(x.dividends)}) = <b class="${cls(x.tsr)}">${signPct(x.tsr)}</b></p>
+        ${waterfall(x)}
+        <ul class="xray-notes">
+          <li><b>Lucros acumulados:</b> tudo o que a empresa lucrou (ou perdeu) por ação. É o motor do patrimônio.</li>
+          <li><b>Emissão e recompra:</b> recomprar abaixo do valor patrimonial ou emitir acima dele cria valor por ação; o contrário destrói.</li>
+          <li><b>Prêmio do mercado:</b> quanto a bolsa paga acima (ou abaixo) do patrimônio. Sobe com rentabilidade acima do custo de capital e crescimento; cai com prejuízo, dívida alta e escândalos.</li>
+        </ul>
+      </section>
+      <section class="card">
+        <h2>${isMe ? 'Lições da sua gestão' : `Lições da gestão de ${esc(companyName(id))}`}</h2>
+        <ul class="lessons">${xrayLessons(x).map(([tone, text]) => `<li class="tone-${tone}">${text}</li>`).join('')}</ul>
+        <div class="kv" style="margin-top:12px">
+          <span>Melhor período na bolsa</span><span class="num good">P${x.best.h.period}: ${signPct(x.best.r.stock.change)}</span>
+          <span>Pior período na bolsa</span><span class="num bad">P${x.worst.h.period}: ${signPct(x.worst.r.stock.change)}</span>
+          <span>Rentabilidade média (ROE/período)</span><span class="num ${cls(x.roeAvg - v.rules.config.costOfEquity)}">${pct(x.roeAvg)}</span>
+          <span>Preço médio vs. mercado</span><span class="num">${signPct(x.priceGap)}</span>
+          <span>Participação média</span><span class="num">${pct(x.shareAvg)}</span>
+          <span>Dívida / patrimônio no fim</span><span class="num">${x.debtToEquity == null ? '—' : x.debtToEquity.toFixed(2)}</span>
+        </div>
+      </section>
+    </div>
+    <section class="card" style="margin-top:16px">
+      <h2>DRE acumulada da partida</h2>
+      <div class="table-scroll"><table>
+        <thead><tr><th></th><th class="num">${esc(companyName(id))}</th><th class="num">Média do mercado</th></tr></thead>
+        <tbody>${rows.map(([label, key, sign = 1, strong]) => `
+          <tr class="${strong ? 'strong' : ''}"><td>${label}</td>
+            <td class="num ${key === 'net' ? cls(x.acc[key]) : ''}">${money(sign < 0 ? -x.acc[key] : x.acc[key])}</td>
+            <td class="num muted">${money((sign < 0 ? -1 : 1) * avg((it) => it.acc[key]))}</td></tr>`).join('')}</tbody>
+      </table></div>
+    </section>
+    <section class="card" style="margin-top:16px">
+      <h2>Comparativo de todos os CEOs</h2>
+      <div class="table-scroll"><table>
+        <thead><tr><th>Empresa</th><th class="num">Lucros/ação</th><th class="num">Emissão/recompra</th><th class="num">Prêmio do mercado</th><th class="num">Dividendos recebidos</th><th class="num">ROE médio</th><th class="num">Valorização</th></tr></thead>
+        <tbody>${all.map(({ p, x: it }) => `
+          <tr class="${p.id === v.me.id ? 'me' : ''}">
+            <td><span class="dot" style="background:${companyColor(p.id)}"></span>${esc(p.companyName)}</td>
+            <td class="num ${cls(it.eps)}">${money2(it.eps)}</td>
+            <td class="num ${cls(it.issue)}">${money2(it.issue)}</td>
+            <td class="num ${cls(it.premium)}">${money2(it.premium)}</td>
+            <td class="num">${money2(it.dividends)}</td>
+            <td class="num">${pct(it.roeAvg)}</td>
+            <td class="num ${cls(it.tsr)}"><b>${signPct(it.tsr)}</b></td>
+          </tr>`).join('')}</tbody>
+      </table></div>
+    </section>`;
+  $('#xray-company').addEventListener('change', (e) => { S.selCompany = e.target.value; render(); });
+}
+
+const C_initial = () => S.view.rules.config.initialPrice;
+
 // ---------- notícias ----------
 function headlines(h) {
   const v = S.view;
@@ -1321,11 +1715,18 @@ function headlines(h) {
     if (r.appliedFinance.issuedShares > 0) out.push(`🧾 <b>${esc(companyName(id))}</b> emitiu ${int(r.appliedFinance.issuedShares)} novas ações.`);
     if (r.income.netIncome < 0) out.push(`🔻 <b>${esc(companyName(id))}</b> registrou prejuízo de ${money(-r.income.netIncome)}.`);
   }
+  for (const k of h.market.cartels ?? []) {
+    const names = k.members.map((id) => `<b>${esc(companyName(id))}</b>`).join(', ');
+    const partners = k.members.filter((id) => !k.delators.includes(id)).map((id) => `<b>${esc(companyName(id))}</b>`).join(', ');
+    out.unshift(k.byDelation
+      ? `🗣️ DELAÇÃO PREMIADA: ${k.delators.map((id) => `<b>${esc(companyName(id))}</b>`).join(', ')} entregou os parceiros de cartel (${partners}), que foram multados. O delator ficou imune.`
+      : `🚔 CADE desmantela cartel de preços entre ${names}. Todos foram multados.`);
+  }
   const acq = h.market.acquisition;
   if (acq?.winnerId) out.unshift(`🏢 <b>${esc(companyName(acq.winnerId))}</b> venceu o leilão de <b>${esc(acq.name)}</b> por ${money(acq.price)} (${acq.bidders} lance${acq.bidders > 1 ? 's' : ''} válido${acq.bidders > 1 ? 's' : ''}).`);
   else if (acq) out.push(`🏚️ Ninguém deu lance válido por <b>${esc(acq.name)}</b>.`);
   for (const [id, r] of reps) {
-    for (const sc of r.events?.scandals ?? []) {
+    for (const sc of (r.events?.scandals ?? []).filter((x) => x.key !== 'cartel')) {
       out.unshift(`🚔 ESCÂNDALO: <b>${esc(companyName(id))}</b> é pega por ${esc(sc.label.toLowerCase())}${sc.reported ? ' após denúncia anônima' : ''}. Multa de ${money(sc.fine)}.`);
     }
     if (r.events?.falseAccusationAgainst) out.unshift(`⚖️ <b>${esc(companyName(id))}</b> acusou <b>${esc(companyName(r.events.falseAccusationAgainst))}</b> sem provas e terá de pagar ${money(v.rules.config.falseReportIndemnity)} de indenização.`);
@@ -1402,6 +1803,21 @@ function renderHelp(tab) {
       é <b>denúncia caluniosa</b>: o denunciante paga ${money(C.falseReportIndemnity)} de indenização ao denunciado, perde
       reputação e tem o nome publicado. Dica: analise os demonstrativos públicos —
       imposto zerado ou custo unitário baixo demais podem ser pistas.</p>` : ''}
+      ${v.settings.allowIllegal !== false ? `
+      <h3>Cartel de preços e delação premiada</h3>
+      <p>Um CEO pode propor em segredo um <b>preço mínimo</b> a outras empresas. O convite chega no período seguinte; com dois
+      ou mais membros, o cartel começa a valer. Ninguém é obrigado a cumprir o preço combinado (os membros veem quem furou),
+      mas todos acumulam uma vantagem indevida de ${pct(C.cartelGainShare, 0)} da receita por período. O CADE investiga o grupo
+      todo junto (risco crescente a cada período, maior com denúncias contra qualquer membro). Se pegar, <b>todos</b> são
+      multados. A qualquer momento, um membro pode <b>delatar</b>: o cartel cai no mesmo fechamento, os parceiros são multados e
+      o delator fica imune.</p>` : ''}
+      <h3>Acesso e lembretes</h3>
+      <p>Cada CEO tem um <b>código pessoal</b> (no rodapé do jogo) que abre a empresa em qualquer aparelho. Copie o seu link de
+      acesso e guarde. Para não perder prazos: avise o grupo no WhatsApp, ligue os avisos do navegador ou, no modo diário,
+      adicione os prazos à sua agenda.</p>
+      <h3>Raio-X do CEO</h3>
+      <p>A aba Raio-X mostra de onde veio a valorização de cada empresa (lucros, operações com ações e prêmio do mercado), a DRE
+      acumulada e lições sobre a gestão. Ela usa só os dados publicados.</p>
       <h3>Regras contábeis</h3>
       <ul>
         <li>Estoque avaliado ao custo médio. Estocagem: ${money2(C.inventoryCarryCost)} por unidade por período.</li>

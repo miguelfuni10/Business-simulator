@@ -1,7 +1,7 @@
 // Regras da partida: sala, jogadores, envio de decisões e fechamento de períodos.
 import crypto from 'node:crypto';
 import {
-  ACQUISITION_TARGETS, CONFIG, DECISIONS, ILLEGAL_PRACTICES, buyingPowerOf, capacityOf, createCompany, createRng,
+  ACQUISITION_TARGETS, CARTEL_PRACTICE, CONFIG, DECISIONS, ILLEGAL_PRACTICES, buyingPowerOf, capacityOf, createCompany, createRng,
   creditLimitOf, defaultDecisions, defaultMoves, detectionRisk, equityOf, generateEnvironment, initialEnvironment,
   interestRateFor, periodSeed, sanitizeDecisions, sanitizeMoves, simulatePeriod,
 } from './engine.js';
@@ -22,6 +22,10 @@ export class GameError extends Error {
 
 const randomId = () => crypto.randomBytes(6).toString('hex');
 const randomToken = () => crypto.randomBytes(18).toString('hex');
+const PIN_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+const randomPin = () => Array.from({ length: 6 }, () => PIN_ALPHABET[crypto.randomInt(PIN_ALPHABET.length)]).join('');
+const MAX_RECOVER_FAILS = 10;
+const RECOVER_WINDOW_MS = 10 * 60 * 1000;
 
 function cleanText(value, field, max) {
   const text = String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
@@ -52,6 +56,7 @@ function addPlayer(game, { name, companyName, isBot = false, botProfile = null }
   const player = {
     id: randomId(),
     token: isBot ? null : randomToken(),
+    pin: isBot ? null : randomPin(), // código pessoal para entrar de outro aparelho
     name,
     companyName,
     isHost: game.players.length === 0,
@@ -126,6 +131,29 @@ function touch(game, now = Date.now()) {
   game.updatedAt = now;
 }
 
+/** Partidas criadas antes do código pessoal ganham um na primeira consulta. */
+function ensurePins(game) {
+  for (const p of game.players) if (!p.isBot && !p.pin) p.pin = randomPin();
+}
+
+const normalizePin = (pin) => String(pin ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+/** Entrar de outro aparelho com o código pessoal. Limita tentativas para evitar chutes. */
+export function recoverAccess(game, pin, now = Date.now()) {
+  ensurePins(game);
+  game.recoverFails = (game.recoverFails ?? []).filter((t) => now - t < RECOVER_WINDOW_MS);
+  if (game.recoverFails.length >= MAX_RECOVER_FAILS) {
+    throw new GameError(429, 'Muitas tentativas erradas. Espere alguns minutos e tente de novo.');
+  }
+  const wanted = normalizePin(pin);
+  const player = wanted.length === 6 ? game.players.find((p) => !p.isBot && p.pin === wanted) : null;
+  if (!player) {
+    game.recoverFails.push(now);
+    throw new GameError(403, 'Código pessoal incorreto. Confira com quem tem o seu link de acesso.');
+  }
+  return player;
+}
+
 export function joinGame(game, input) {
   if (game.status !== 'lobby') throw new GameError(400, 'Esta partida já começou.');
   const player = addPlayer(game, {
@@ -192,10 +220,82 @@ export function submitDecisions(game, player, raw, now = Date.now()) {
   game.pending[player.id] = {
     decisions: sanitizeDecisions(raw?.decisions, company),
     moves: sanitizeMoves(raw?.moves, company, game.settings),
+    cartel: sanitizeCartelMove(game, player, raw?.moves?.cartel),
   };
   touch(game, now);
   const humans = game.players.filter((p) => !p.isBot);
   if (closesEarly(game.settings) && humans.every((p) => game.pending[p.id])) closePeriod(game, now);
+}
+
+// ---------- cartel ----------
+const liveCartel = (c) => c.status === 'forming' || c.status === 'active';
+const cartelOf = (game, playerId) => (game.cartels ?? []).find((c) => liveCartel(c) && c.members.includes(playerId));
+
+/**
+ * Movimento de cartel do jogador neste período:
+ * propor (preço mínimo + convidados), aceitar convite, sair ou delatar.
+ */
+function sanitizeCartelMove(game, player, raw) {
+  if (!raw || game.settings.allowIllegal === false) return null;
+  const mine = cartelOf(game, player.id);
+  if (raw.type === 'propose' && !mine) {
+    const price = Math.round(Number(raw.price) * 100) / 100;
+    const others = new Set(game.players.filter((p) => p.id !== player.id).map((p) => p.id));
+    const invite = [...new Set(Array.isArray(raw.invite) ? raw.invite : [])].filter((id) => others.has(id));
+    if (!(price >= 10 && price <= 200)) throw new GameError(400, 'Preço mínimo do cartel inválido.');
+    if (!invite.length) throw new GameError(400, 'Convide pelo menos uma empresa para o cartel.');
+    return { type: 'propose', price, invite };
+  }
+  if (raw.type === 'accept' && !mine) {
+    const c = (game.cartels ?? []).find((x) => x.id === raw.cartelId && liveCartel(x) && x.invited.includes(player.id));
+    return c ? { type: 'accept', cartelId: c.id } : null;
+  }
+  if ((raw.type === 'leave' || raw.type === 'delate') && mine) {
+    return { type: raw.type, cartelId: mine.id };
+  }
+  return null;
+}
+
+/** Atualiza os cartéis depois do fechamento: desmantelados, saídas, novos membros e propostas. */
+function updateCartels(game, cartelMoves, market, period) {
+  game.cartels ??= [];
+  for (const c of game.cartels.filter((x) => x.status === 'active')) {
+    const result = market.cartels.find((r) => r.id === c.id);
+    if (result) {
+      c.status = 'exposed';
+      c.endedPeriod = period;
+      c.byDelation = result.byDelation;
+      c.delators = result.delators;
+    } else {
+      c.periods += 1;
+    }
+  }
+  for (const [playerId, mv] of Object.entries(cartelMoves)) {
+    const c = game.cartels.find((x) => x.id === mv.cartelId && liveCartel(x));
+    if (mv.type === 'leave' && c) c.members = c.members.filter((id) => id !== playerId);
+    if (mv.type === 'accept' && c && !cartelOf(game, playerId)) {
+      c.members.push(playerId);
+      c.invited = c.invited.filter((id) => id !== playerId);
+    }
+  }
+  for (const [playerId, mv] of Object.entries(cartelMoves)) {
+    if (mv.type === 'propose' && !cartelOf(game, playerId)) {
+      game.cartels.push({
+        id: `C${period}-${playerId}`,
+        founderId: playerId,
+        price: mv.price,
+        members: [playerId],
+        invited: mv.invite,
+        status: 'forming',
+        createdPeriod: period,
+        periods: 0,
+      });
+    }
+  }
+  for (const c of game.cartels.filter(liveCartel)) {
+    if (c.members.length >= 2) c.status = 'active';
+    else if (c.status === 'active' || c.members.length === 0) { c.status = 'dissolved'; c.endedPeriod = period; }
+  }
 }
 
 /**
@@ -269,9 +369,20 @@ export function closePeriod(game, now = Date.now(), { scheduledAt = null } = {})
   }
   const companies = game.players.map((p) => game.companies[p.id]);
   const rng = createRng(periodSeed(game.seed, game.period, 1));
+  const cartelMoves = Object.fromEntries(game.players
+    .filter((p) => game.pending[p.id]?.cartel)
+    .map((p) => [p.id, game.pending[p.id].cartel]));
+  const cartels = (game.cartels ?? []).filter((c) => c.status === 'active').map((c) => ({
+    id: c.id,
+    members: c.members,
+    periods: c.periods,
+    delators: c.members.filter((id) => cartelMoves[id]?.type === 'delate'),
+  }));
   const result = simulatePeriod(companies, decisions, game.env, rng, game.period, moves, {
     finalPeriod: game.period >= game.settings.totalPeriods,
+    cartels,
   });
+  updateCartels(game, cartelMoves, result.market, game.period);
   for (const c of result.companies) game.companies[c.id] = c;
   for (const [id, report] of Object.entries(result.reports)) game.lastDecisions[id] = report.decisions;
   game.history.push({
@@ -333,9 +444,37 @@ function companySnapshot(c) {
   };
 }
 
+/** O que o jogador sabe sobre cartéis: convites recebidos, o seu cartel e a fidelidade dos parceiros. */
+function cartelViewFor(game, me) {
+  const name = (id) => game.players.find((p) => p.id === id)?.companyName ?? '?';
+  const live = (game.cartels ?? []).filter(liveCartel);
+  const mine = live.find((c) => c.members.includes(me.id));
+  const last = game.history.at(-1);
+  return {
+    pendingMove: game.pending[me.id]?.cartel ?? null,
+    invites: mine ? [] : live.filter((c) => c.invited.includes(me.id)).map((c) => ({
+      id: c.id, founder: name(c.founderId), price: c.price, members: c.members.map(name),
+    })),
+    membership: mine && {
+      id: mine.id,
+      price: mine.price,
+      status: mine.status,
+      periods: mine.periods,
+      founder: name(mine.founderId),
+      members: mine.members.map((id) => ({
+        id,
+        name: name(id),
+        lastPrice: last?.reports[id]?.decisions.price ?? null,
+      })),
+      invited: mine.invited.map(name),
+    },
+  };
+}
+
 /** O que um jogador enxerga. Resultados publicados são públicos (empresas de capital aberto). */
 export function viewFor(game, player) {
   const me = player;
+  ensurePins(game);
   const view = {
     code: game.code,
     version: game.version,
@@ -344,7 +483,7 @@ export function viewFor(game, player) {
     settings: game.settings,
     nextDeadline: game.nextDeadline,
     serverTime: Date.now(),
-    me: { id: me.id, name: me.name, companyName: me.companyName, isHost: me.isHost },
+    me: { id: me.id, name: me.name, companyName: me.companyName, isHost: me.isHost, pin: me.pin },
     players: game.players.map((p) => ({
       id: p.id,
       name: p.name,
@@ -359,6 +498,7 @@ export function viewFor(game, player) {
       decisions: DECISIONS,
       botProfiles: BOT_PROFILES,
       illegalPractices: ILLEGAL_PRACTICES,
+      cartelPractice: CARTEL_PRACTICE,
       acquisitionTargets: ACQUISITION_TARGETS,
     },
     history: game.history.map((h) => ({
@@ -380,6 +520,7 @@ export function viewFor(game, player) {
     if (myCompany && game.env) {
       view.myInterestRate = interestRateFor(myCompany.debt, equityOf(myCompany), game.env.interestRate);
       view.myBuyingPower = buyingPowerOf(myCompany);
+      view.myCartel = cartelViewFor(game, me);
       view.myIllegal = {
         investigation: myCompany.investigation || 0,
         practices: Object.fromEntries(ILLEGAL_PRACTICES.map((pr) => {

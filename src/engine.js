@@ -53,6 +53,7 @@ export const CONFIG = Object.freeze({
   investigationPeriods: 4, // períodos sob investigação após ser pego (risco 1,5×)
   governanceDiscount: 0.03, // cada condenação tira 3% do valor da ação para sempre (máx. 15%)
   accountingFraudBoost: 0.04, // lucro fictício: 4% da receita
+  cartelGainShare: 0.05, // vantagem indevida do cartel (base da multa): 5% da receita por período
   finalAuditRisk: 0.25, // risco extra de detecção no último período (auditoria de encerramento)
 });
 
@@ -159,8 +160,15 @@ export const ILLEGAL_PRACTICES = Object.freeze([
     baseRisk: 0.08, streakRisk: 0.07, shock: 0.4, reputationHit: 0.08,
   },
 ]);
+// Cartel: prática em grupo. Não é marcada como as outras; nasce de uma proposta aceita entre empresas.
+export const CARTEL_PRACTICE = Object.freeze({
+  key: 'cartel', label: 'Cartel de preços',
+  benefit: 'Concorrentes combinam um preço mínimo e todos lucram mais, se ninguém furar o acordo.',
+  risk: 'O CADE investiga; qualquer membro pode delatar os outros em troca de imunidade.',
+  baseRisk: 0.08, streakRisk: 0.05, shock: 0.2, reputationHit: 0.08,
+});
 const PRACTICE_KEYS = new Set(ILLEGAL_PRACTICES.map((x) => x.key));
-const practiceByKey = Object.fromEntries(ILLEGAL_PRACTICES.map((x) => [x.key, x]));
+const practiceByKey = Object.fromEntries([...ILLEGAL_PRACTICES, CARTEL_PRACTICE].map((x) => [x.key, x]));
 
 // Empresas que podem aparecer à venda. Valores são multiplicados por um fator aleatório.
 export const ACQUISITION_TARGETS = Object.freeze([
@@ -397,9 +405,10 @@ export function unitCostEstimate(units, salaryPct, materialMult, illegal = []) {
  * @param movesById movimentos opcionais por empresa (aquisição, práticas ilegais, denúncia)
  * @param options.finalPeriod último período: auditoria de encerramento aumenta o risco de detecção
  * @param options.deterministic projeção: sem sorte/azar, sem detecção de práticas ilegais e sem leilão
+ * @param options.cartels cartéis ativos: [{ id, members, delators, periods }]
  * @returns {{ companies: object[], reports: Record<string, object>, market: object }}
  */
-export function simulatePeriod(companies, decisionsById, env, rng, period = 1, movesById = {}, { finalPeriod = false, deterministic = false } = {}) {
+export function simulatePeriod(companies, decisionsById, env, rng, period = 1, movesById = {}, { finalPeriod = false, deterministic = false, cartels = [] } = {}) {
   const C = CONFIG;
   const noise = deterministic ? () => 0 : () => gaussian(rng);
   const demandNoise = Math.exp(noise() * 0.03);
@@ -425,6 +434,19 @@ export function simulatePeriod(companies, decisionsById, env, rng, period = 1, m
   });
   const n = ps.length;
 
+  // Práticas ativas neste período: as marcadas pela empresa + cartel, se ela estiver em um.
+  const byId = Object.fromEntries(ps.map((p) => [p.c.id, p]));
+  const groups = cartels
+    .map((g) => ({ ...g, members: g.members.filter((id) => byId[id]) }))
+    .filter((g) => g.members.length >= 2);
+  for (const p of ps) p.active = [...p.mv.illegal];
+  for (const g of groups) {
+    for (const id of g.members) {
+      byId[id].cartel = g;
+      byId[id].active.push('cartel');
+    }
+  }
+
   // Espionagem: copia parte do P&D dos concorrentes.
   for (const p of ps) {
     p.stolen = 0;
@@ -439,18 +461,40 @@ export function simulatePeriod(companies, decisionsById, env, rng, period = 1, m
   for (const p of ps) if (p.mv.reportTarget) reportsAgainst[p.mv.reportTarget].push(p.c.id);
   for (const p of ps) {
     p.caught = [];
-    const keys = new Set([...p.mv.illegal, ...Object.keys(p.c.illegal ?? {}).filter((k) => p.c.illegal[k].exposure > 0)]);
+    const keys = new Set([...p.active, ...Object.keys(p.c.illegal ?? {}).filter((k) => p.c.illegal[k].exposure > 0)]);
     for (const key of [...keys].sort()) {
-      const active = p.mv.illegal.includes(key);
+      if (key === 'cartel' && p.cartel) continue; // cartel ativo é investigado em grupo, abaixo
+      const active = p.active.includes(key);
       const risk = Math.min(0.95, detectionRisk(p.c, key, active)
         + C.reportDetectionBoost * reportsAgainst[p.c.id].length
         + (finalPeriod ? C.finalAuditRisk : 0));
       if (!deterministic && rng() < risk) p.caught.push(key);
     }
   }
+  // Cartel: delação derruba o grupo na hora (delator ganha imunidade); senão o CADE investiga o grupo todo.
+  const cartelResults = [];
+  for (const g of groups) {
+    const delators = (g.delators ?? []).filter((id) => g.members.includes(id));
+    let exposed = delators.length > 0;
+    if (!exposed && !deterministic) {
+      const reports = sum(g.members, (id) => reportsAgainst[id].length);
+      const investigated = g.members.some((id) => byId[id].c.investigation > 0);
+      const risk = Math.min(0.95,
+        (CARTEL_PRACTICE.baseRisk + CARTEL_PRACTICE.streakRisk * (g.periods || 0)) * (investigated ? 1.5 : 1)
+        + C.reportDetectionBoost * reports + (finalPeriod ? C.finalAuditRisk : 0));
+      exposed = rng() < risk;
+    }
+    if (exposed) {
+      for (const id of g.members) {
+        if (delators.includes(id)) byId[id].leniency = true;
+        else byId[id].caught.push('cartel');
+      }
+    }
+    cartelResults.push({ id: g.id, members: g.members, exposed, byDelation: delators.length > 0, delators });
+  }
   const reportSucceeded = (p) => Boolean(ps.find((x) => x.c.id === p.mv.reportTarget)?.caught.length);
   // Denúncia caluniosa: o denunciado não praticava nada nem tinha ganhos ilícitos expostos.
-  const isHonest = (p) => p.mv.illegal.length === 0
+  const isHonest = (p) => p.active.length === 0
     && !Object.values(p.c.illegal ?? {}).some((st) => st.exposure > 0);
   const falseReporters = Object.fromEntries(companies.map((c) => [c.id, []]));
   for (const p of ps) {
@@ -576,7 +620,7 @@ export function simulatePeriod(companies, decisionsById, env, rng, period = 1, m
 
     // Ganhos ilícitos deste período (base para multas futuras).
     const gains = {};
-    for (const key of mv.illegal) {
+    for (const key of p.active) {
       if (key === 'taxEvasion') gains[key] = tax;
       else if (key === 'informalLabor' || key === 'illegalDumping') {
         const laborOnly = key === 'informalLabor'
@@ -586,17 +630,20 @@ export function simulatePeriod(companies, decisionsById, env, rng, period = 1, m
       } else if (key === 'falseAdvertising') gains[key] = 0.5 * d.marketing;
       else if (key === 'espionage') gains[key] = p.stolen;
       else if (key === 'accountingFraud') gains[key] = C.accountingFraudBoost * revenue;
+      else if (key === 'cartel') gains[key] = C.cartelGainShare * revenue;
     }
     if (mv.illegal.includes('taxEvasion')) tax = 0;
 
     // Multas pelas práticas descobertas e recompensa por denúncia.
     const illegal = {};
     for (const [key, st] of Object.entries(c.illegal ?? {})) illegal[key] = { ...st };
-    for (const key of mv.illegal) {
+    for (const key of p.active) {
       const st = illegal[key] ?? { streak: 0, exposure: 0 };
       illegal[key] = { streak: st.streak + 1, exposure: st.exposure + gains[key] };
     }
-    for (const key of Object.keys(illegal)) if (!mv.illegal.includes(key)) illegal[key].streak = 0;
+    for (const key of Object.keys(illegal)) if (!p.active.includes(key)) illegal[key].streak = 0;
+    // Delação premiada: o delator fica livre da punição pelo cartel.
+    if (p.leniency) illegal.cartel = { streak: 0, exposure: 0 };
     const scandals = [];
     let fines = 0;
     let shock = 0;
@@ -610,7 +657,10 @@ export function simulatePeriod(companies, decisionsById, env, rng, period = 1, m
       shock += pr.shock;
       reputationHit += pr.reputationHit;
       if (pr.brandHit) brandAfter *= 1 - pr.brandHit;
-      scandals.push({ key, label: pr.label, fine, repeatOffender, reported: reportsAgainst[c.id].length > 0 });
+      scandals.push({
+        key, label: pr.label, fine, repeatOffender, reported: reportsAgainst[c.id].length > 0,
+        byDelation: key === 'cartel' && Boolean(p.cartel && cartelResults.find((r) => r.id === p.cartel.id)?.byDelation),
+      });
       illegal[key] = { streak: 0, exposure: 0 };
     }
     const reward = mv.reportTarget && reportSucceeded(p) ? C.reportReward : 0;
@@ -792,6 +842,7 @@ export function simulatePeriod(companies, decisionsById, env, rng, period = 1, m
         // Denúncias caluniosas são públicas: quem acusou uma empresa honesta é exposto.
         falseAccusers: falseReporters[c.id],
         falseAccusationAgainst: falseReport ? mv.reportTarget : null,
+        leniency: Boolean(p.leniency), // delatou o próprio cartel e ganhou imunidade
         convictions,
       },
       // Privado: só a própria empresa enxerga.
@@ -821,6 +872,8 @@ export function simulatePeriod(companies, decisionsById, env, rng, period = 1, m
         price: acquisition.price,
         bidders: acquisition.bidders,
       },
+      // Só cartéis desmantelados viram públicos.
+      cartels: cartelResults.filter((r) => r.exposed),
     },
   };
 }
