@@ -45,9 +45,11 @@ export const CONFIG = Object.freeze({
   reportCost: 20_000, // custo jurídico de uma denúncia
   reportReward: 60_000, // recompensa quando a denúncia leva a uma condenação
   reportDetectionBoost: 0.3, // chance extra de detecção por denúncia recebida
-  fineMultiplier: 2, // multa = 2× o ganho ilícito acumulado + multa fixa
-  fixedFine: 50_000,
-  investigationPeriods: 3, // períodos sob investigação após ser pego (risco 1,5×)
+  fineMultiplier: 3, // multa = 3× o ganho ilícito acumulado + multa fixa
+  fixedFine: 100_000,
+  repeatOffenderMultiplier: 2, // reincidente paga multa dobrada
+  investigationPeriods: 4, // períodos sob investigação após ser pego (risco 1,5×)
+  governanceDiscount: 0.03, // cada condenação tira 3% do valor da ação para sempre (máx. 15%)
   accountingFraudBoost: 0.04, // lucro fictício: 4% da receita
   finalAuditRisk: 0.25, // risco extra de detecção no último período (auditoria de encerramento)
 });
@@ -122,37 +124,37 @@ export const ILLEGAL_PRACTICES = Object.freeze([
     key: 'taxEvasion', label: 'Sonegação de impostos',
     benefit: 'Não paga IR/CSLL neste período.',
     risk: 'A Receita cruza dados: quanto mais tempo, maior o risco.',
-    baseRisk: 0.1, streakRisk: 0.05, shock: 0.15, reputationHit: 0.03,
+    baseRisk: 0.1, streakRisk: 0.05, shock: 0.2, reputationHit: 0.05,
   },
   {
     key: 'informalLabor', label: 'Trabalho informal',
     benefit: 'Mão de obra 30% mais barata.',
     risk: 'Fiscalização do trabalho e ações trabalhistas; os clientes não gostam.',
-    baseRisk: 0.1, streakRisk: 0.05, shock: 0.15, reputationHit: 0.12,
+    baseRisk: 0.1, streakRisk: 0.05, shock: 0.2, reputationHit: 0.2,
   },
   {
     key: 'illegalDumping', label: 'Descarte ilegal de resíduos',
     benefit: 'Economiza R$ 3 por unidade produzida.',
     risk: 'Crime ambiental: multa pesada e manchete negativa.',
-    baseRisk: 0.08, streakRisk: 0.05, shock: 0.15, reputationHit: 0.1,
+    baseRisk: 0.08, streakRisk: 0.05, shock: 0.2, reputationHit: 0.15,
   },
   {
     key: 'falseAdvertising', label: 'Propaganda enganosa',
     benefit: 'Cada real de marketing rende o dobro em força de marca.',
     risk: 'Procon e concorrentes ficam de olho. Se pego, a marca perde 40%.',
-    baseRisk: 0.12, streakRisk: 0.05, shock: 0.1, reputationHit: 0.08, brandHit: 0.4,
+    baseRisk: 0.12, streakRisk: 0.05, shock: 0.15, reputationHit: 0.12, brandHit: 0.4,
   },
   {
     key: 'espionage', label: 'Espionagem industrial',
     benefit: 'Copia o equivalente a 30% do P&D médio dos concorrentes.',
     risk: 'Ex-funcionários costumam falar.',
-    baseRisk: 0.08, streakRisk: 0.06, shock: 0.12, reputationHit: 0.05,
+    baseRisk: 0.08, streakRisk: 0.06, shock: 0.15, reputationHit: 0.08,
   },
   {
     key: 'accountingFraud', label: 'Maquiagem contábil',
     benefit: 'Os investidores enxergam um lucro maior (4% da receita) e a ação sobe.',
-    risk: 'Auditoria e CVM. Se descoberta, a ação desaba ~30%.',
-    baseRisk: 0.08, streakRisk: 0.07, shock: 0.3, reputationHit: 0.05,
+    risk: 'Auditoria e CVM. Se descoberta, a ação desaba ~40%.',
+    baseRisk: 0.08, streakRisk: 0.07, shock: 0.4, reputationHit: 0.08,
   },
 ]);
 const PRACTICE_KEYS = new Set(ILLEGAL_PRACTICES.map((x) => x.key));
@@ -257,6 +259,7 @@ export function createCompany(id, name) {
     acquisitions: [],
     illegal: {},
     investigation: 0,
+    convictions: 0,
     lossCarryforward: 0,
     lastAdjNI: 0,
     lastRevenue: C.baseDemandPerCompany * C.refPrice,
@@ -391,12 +394,14 @@ export function unitCostEstimate(units, salaryPct, materialMult, illegal = []) {
  * Simula um período contábil para todas as empresas que disputam o mesmo mercado.
  * @param movesById movimentos opcionais por empresa (aquisição, práticas ilegais, denúncia)
  * @param options.finalPeriod último período: auditoria de encerramento aumenta o risco de detecção
+ * @param options.deterministic projeção: sem sorte/azar, sem detecção de práticas ilegais e sem leilão
  * @returns {{ companies: object[], reports: Record<string, object>, market: object }}
  */
-export function simulatePeriod(companies, decisionsById, env, rng, period = 1, movesById = {}, { finalPeriod = false } = {}) {
+export function simulatePeriod(companies, decisionsById, env, rng, period = 1, movesById = {}, { finalPeriod = false, deterministic = false } = {}) {
   const C = CONFIG;
-  const demandNoise = Math.exp(gaussian(rng) * 0.03);
-  const marketMood = gaussian(rng) * 0.01 + (env.sentiment || 0);
+  const noise = deterministic ? () => 0 : () => gaussian(rng);
+  const demandNoise = Math.exp(noise() * 0.03);
+  const marketMood = noise() * 0.01 + (env.sentiment || 0);
   const ids = new Set(companies.map((c) => c.id));
 
   const ps = companies.map((c) => {
@@ -438,14 +443,14 @@ export function simulatePeriod(companies, decisionsById, env, rng, period = 1, m
       const risk = Math.min(0.95, detectionRisk(p.c, key, active)
         + C.reportDetectionBoost * reportsAgainst[p.c.id].length
         + (finalPeriod ? C.finalAuditRisk : 0));
-      if (rng() < risk) p.caught.push(key);
+      if (!deterministic && rng() < risk) p.caught.push(key);
     }
   }
   const reportSucceeded = (p) => Boolean(ps.find((x) => x.c.id === p.mv.reportTarget)?.caught.length);
 
   // Leilão da empresa à venda: maior lance acima do mínimo leva (paga o próprio lance).
   let acquisition = null;
-  const target = env.acquisition;
+  const target = deterministic ? null : env.acquisition;
   if (target) {
     const bids = ps.filter((p) => p.mv.acquisitionBid >= target.minBid);
     if (bids.length) {
@@ -589,16 +594,20 @@ export function simulatePeriod(companies, decisionsById, env, rng, period = 1, m
     let brandAfter = p.brand;
     for (const key of p.caught) {
       const pr = practiceByKey[key];
-      const fine = C.fineMultiplier * illegal[key].exposure + C.fixedFine;
+      const repeatOffender = (c.convictions || 0) + scandals.length > 0;
+      const fine = (C.fineMultiplier * illegal[key].exposure + C.fixedFine) * (repeatOffender ? C.repeatOffenderMultiplier : 1);
       fines += fine;
       shock += pr.shock;
       reputationHit += pr.reputationHit;
       if (pr.brandHit) brandAfter *= 1 - pr.brandHit;
-      scandals.push({ key, label: pr.label, fine, reported: reportsAgainst[c.id].length > 0 });
+      scandals.push({ key, label: pr.label, fine, repeatOffender, reported: reportsAgainst[c.id].length > 0 });
       illegal[key] = { streak: 0, exposure: 0 };
     }
     const reward = mv.reportTarget && reportSucceeded(p) ? C.reportReward : 0;
     const investigation = p.caught.length ? C.investigationPeriods : Math.max(0, (c.investigation || 0) - 1);
+    const convictions = (c.convictions || 0) + p.caught.length;
+    // Empresa com histórico de condenações carrega um desconto permanente na bolsa.
+    const governanceMult = Math.max(0.85, 1 - C.governanceDiscount * convictions);
 
     // Caixa.
     const operatingBeforeFee =
@@ -670,7 +679,7 @@ export function simulatePeriod(companies, decisionsById, env, rng, period = 1, m
     }
     const scandalMult = Math.max(0.4, 1 - shock);
     const price = round2(Math.max(0.1,
-      (0.6 * targetPrice + 0.4 * c.price) * Math.exp(gaussian(rng) * 0.03 + marketMood) * scandalMult));
+      (0.6 * targetPrice * governanceMult + 0.4 * c.price) * Math.exp(noise() * 0.03 + marketMood) * scandalMult));
     const cumDividendsPerShare = c.cumDividendsPerShare + dividendsPerShare;
     const tsr = (price + cumDividendsPerShare) / C.initialPrice - 1;
 
@@ -692,6 +701,7 @@ export function simulatePeriod(companies, decisionsById, env, rng, period = 1, m
       acquisitions: p.acquired ? [...(c.acquisitions ?? []), { period, name: p.acquired.target.name, price: acquisitionPrice }] : (c.acquisitions ?? []),
       illegal,
       investigation,
+      convictions,
       lossCarryforward,
       lastAdjNI: adjNI,
       lastRevenue: revenue,
@@ -764,6 +774,7 @@ export function simulatePeriod(companies, decisionsById, env, rng, period = 1, m
         acquired: p.acquired ? { name: p.acquired.target.name, price: acquisitionPrice } : null,
         scandals,
         reportsReceived: reportsAgainst[c.id].length,
+        convictions,
       },
       // Privado: só a própria empresa enxerga.
       private: {

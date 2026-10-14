@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import {
-  PERIOD_MINUTES, addBot, closePeriod, createGame, joinGame, nextDailyDeadline, runDeadlines, startGame, submitDecisions, viewFor,
+  PERIOD_MINUTES, addBot, closePeriod, previewDecisions, createGame, joinGame, nextDailyDeadline, runDeadlines, startGame, submitDecisions, viewFor,
 } from '../src/game.js';
 import { MemoryStore, RedisStore } from '../src/store.js';
 import { createServer } from '../server.js';
@@ -242,4 +242,22 @@ test('servidor de bolso (versão de teste) atende as mesmas rotas no navegador',
   // recarregar a página: a partida volta do armazenamento do navegador
   const reloaded = createLocalApi(storage);
   assert.equal((await reloaded('GET', `/api/games/${code}?token=${token}`)).period, 2);
+});
+
+test('projeção: estima o período sem sorte, sem mexer no jogo e sem usar decisões pendentes', () => {
+  const { game, player: host } = createGame(never, { name: 'Ana', companyName: 'Alfa', totalPeriods: 3, mode: 'live' });
+  const bia = joinGame(game, { name: 'Bia', companyName: 'Beta' });
+  startGame(game, host);
+  submitDecisions(game, bia, { period: 1, decisions: { price: 30 } }); // segredo da Bia
+  const before = JSON.stringify(game);
+  const a = previewDecisions(game, host, { decisions: { price: 60 } });
+  const b = previewDecisions(game, host, { decisions: { price: 60 } });
+  assert.deepEqual(a, b, 'determinística');
+  assert.equal(JSON.stringify(game), before, 'não altera a partida');
+  // se usasse o preço secreto de R$ 30 da Bia, Alfa venderia bem menos que metade do mercado
+  assert.ok(a.operations.marketShare > 0.45);
+  const expensive = previewDecisions(game, host, { decisions: { price: 75 } });
+  assert.ok(expensive.operations.sales < a.operations.sales, 'preço maior, menos vendas');
+  const cheat = previewDecisions(game, host, { decisions: { price: 60 }, moves: { illegal: ['taxEvasion'] } });
+  assert.ok(cheat.income.netIncome > a.income.netIncome, 'projeção mostra o ganho da trapaça (sem risco)');
 });

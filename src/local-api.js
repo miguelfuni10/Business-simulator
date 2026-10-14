@@ -1,7 +1,7 @@
 // Servidor "de bolso": as mesmas rotas do server.js, rodando no próprio navegador.
 // Usado pela versão de teste (artefato), onde não há servidor nem rede.
 import {
-  GameError, addBot, authenticate, createGame, forceClose, joinGame, removePlayer, runDeadlines,
+  GameError, addBot, authenticate, createGame, forceClose, joinGame, previewDecisions, removePlayer, runDeadlines,
   startGame, submitDecisions, viewFor,
 } from './game.js';
 
@@ -37,6 +37,7 @@ export function createLocalApi(storage = globalThis.localStorage, key = 'bsim:lo
       return clone(viewFor(game, player));
     }
     if (method !== 'POST') throw new GameError(404, 'Rota não encontrada.');
+    if (action === 'preview') return clone(previewDecisions(game, authenticate(game, body.token), clone(body)));
     let result = { ok: true };
     if (action === 'join') {
       const player = joinGame(game, body);

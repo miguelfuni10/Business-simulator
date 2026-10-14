@@ -53,13 +53,23 @@ O anfitrião pode ligar ou desligar cada um ao criar a partida.
 - **Bastidores (práticas ilegais)**: sonegação, trabalho informal, descarte ilegal de resíduos, propaganda enganosa,
   espionagem industrial e maquiagem contábil. Dão ganho imediato, mas o risco de ser descoberto cresce a cada período de
   uso, ganhos não punidos continuam expostos e há uma auditoria de encerramento no último período. Se pego: multa de 2× o
-  ganho acumulado + R$ 50 mil, queda da ação, reputação menor e 3 períodos sob investigação. As escolhas são secretas:
-  só os escândalos viram notícia.
+  ganho acumulado + R$ 100 mil (em dobro para reincidentes), tombo forte na bolsa, reputação menor, 4 períodos sob
+  investigação e um desconto permanente de 3% no valor da ação por condenação. As escolhas são secretas: só os
+  escândalos viram notícia.
 - **Denúncia**: cada CEO pode denunciar um concorrente por período (R$ 20 mil em advogados). A denúncia soma +30% de chance
   de descoberta; se o denunciado for pego, o denunciante recebe R$ 60 mil. Contra empresa honesta, é arquivada.
 
-Em simulações, trapacear tem retorno médio levemente negativo, mas aumenta muito a variância: às vezes rende a vitória,
-às vezes afunda a empresa. Usar sempre é quase suicídio.
+Em simulações, trapacear de vez em quando custa em média de 13 a 32 pontos de valorização, embora às vezes renda a
+vitória; trapacear sempre quebra a empresa.
+
+### Ajudas para decidir
+
+- **Como as coisas se afetam**: banner na tela de decisões com a cadeia decisão → clientes e custos → DRE → balanço →
+  cotação, e uma tabela do que cada alavanca dá e cobra.
+- **Sua empresa no início do período**: balanço patrimonial e números de referência (demanda esperada, preço médio,
+  custo por unidade, despesas fixas) antes do formulário.
+- **Projeção do resultado**: enquanto você preenche, o próprio motor do jogo estima vendas, lucro, caixa e cotação,
+  supondo que os concorrentes repitam o último período (sem sorte, leilão ou chance de ser pego).
 
 **Como a ação é precificada**: valor patrimonial por ação × um fator que cresce quando o retorno sobre o patrimônio supera
 o custo de capital (3,5%/período, mais alto para empresas muito endividadas), mais um prêmio por crescimento de receita e

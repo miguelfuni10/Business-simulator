@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openStore } from './src/store.js';
 import {
-  GameError, addBot, authenticate, createGame, forceClose, joinGame, removePlayer, runDeadlines,
+  GameError, addBot, authenticate, createGame, forceClose, joinGame, previewDecisions, removePlayer, runDeadlines,
   startGame, submitDecisions, viewFor,
 } from './src/game.js';
 
@@ -61,6 +61,10 @@ export function createServer(store) {
       submitDecisions(game, authenticate(game, body.token), body);
       return { ok: true };
     }],
+    ['POST', /^\/api\/games\/([A-Za-z]{5})\/preview$/, async (req, game) => {
+      const body = await readBody(req);
+      return previewDecisions(game, authenticate(game, body.token), body);
+    }],
     ['POST', /^\/api\/games\/([A-Za-z]{5})\/close$/, async (req, game) => {
       const body = await readBody(req);
       forceClose(game, authenticate(game, body.token));
@@ -84,7 +88,7 @@ export function createServer(store) {
           if (runDeadlines(game)) store.save(game);
         }
         const result = await handler(req, game, url);
-        if (req.method !== 'GET' && game) store.save(game);
+        if (req.method !== 'GET' && game && !url.pathname.endsWith('/preview')) store.save(game);
         return sendJson(res, 200, result);
       }
       if (req.method !== 'GET' && req.method !== 'HEAD') throw new GameError(405, 'Método não permitido.');

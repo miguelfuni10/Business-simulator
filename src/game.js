@@ -198,6 +198,46 @@ export function submitDecisions(game, player, raw, now = Date.now()) {
   if (closesEarly(game.settings) && humans.every((p) => game.pending[p.id])) closePeriod(game, now);
 }
 
+/**
+ * Projeção do período para um jogador: roda o motor sem sorte/azar, supondo que os concorrentes
+ * repitam as decisões do último período (que são públicas). Não usa as decisões pendentes de ninguém.
+ */
+export function previewDecisions(game, player, raw) {
+  if (game.status !== 'running') throw new GameError(400, 'A partida não está em andamento.');
+  const decisions = {};
+  const moves = {};
+  for (const p of game.players) {
+    decisions[p.id] = game.lastDecisions[p.id] ?? defaultDecisions();
+    moves[p.id] = defaultMoves();
+  }
+  const company = game.companies[player.id];
+  decisions[player.id] = sanitizeDecisions(raw?.decisions, company);
+  moves[player.id] = { ...defaultMoves(), illegal: sanitizeMoves(raw?.moves, company, game.settings).illegal };
+  const companies = game.players.map((p) => game.companies[p.id]);
+  const { reports } = simulatePeriod(companies, decisions, game.env, createRng(1), game.period, moves, { deterministic: true });
+  const r = reports[player.id];
+  return {
+    period: game.period,
+    operations: {
+      demand: r.operations.demand,
+      sales: r.operations.sales,
+      unmet: r.operations.unmet,
+      marketShare: r.operations.marketShare,
+      inventoryUnits: r.operations.inventoryUnits,
+      unitCost: r.operations.unitCost,
+    },
+    income: {
+      revenue: r.income.revenue,
+      grossProfit: r.income.grossProfit,
+      ebit: r.income.ebit,
+      netIncome: r.income.netIncome,
+    },
+    balance: { cash: r.balance.cash, debt: r.balance.debt, equity: r.balance.equity },
+    emergencyLoan: r.cashflow.emergencyLoan,
+    stock: { price: r.stock.price, change: r.stock.change },
+  };
+}
+
 export function forceClose(game, player, now = Date.now()) {
   requireHost(player);
   if (game.status !== 'running') throw new GameError(400, 'A partida não está em andamento.');

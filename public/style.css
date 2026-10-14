@@ -252,3 +252,36 @@ footer { color: var(--muted); font-size: .8rem; text-align: center; padding: 32p
 .localbar-add input { width: 160px; max-width: 100%; }
 .localbar-home { display: flex; gap: 16px; align-items: center; justify-content: space-between; flex-wrap: wrap; border-color: var(--shady-border); background: var(--shady-bg); }
 .localbar-home > div { flex: 1 1 320px; min-width: 0; }
+
+/* Banner "como as coisas se afetam" */
+.guide { margin-top: 16px; }
+.guide summary { cursor: pointer; list-style: none; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.guide summary::-webkit-details-marker { display: none; }
+.guide summary::before { content: "▸"; color: var(--accent); transition: transform .15s; }
+.guide[open] summary::before { transform: rotate(90deg); }
+.flow { list-style: none; padding: 0; margin: 14px 0 10px; display: flex; flex-wrap: wrap; gap: 6px; align-items: stretch; }
+.flow li {
+  display: flex; flex-direction: column; justify-content: center; gap: 2px; flex: 1 1 130px;
+  padding: 8px 12px; border-radius: 8px; background: var(--surface-2); border: 1px solid var(--border); position: relative;
+}
+.flow li small { color: var(--muted); font-size: .78rem; }
+.flow li:not(:last-child)::after {
+  content: "→"; position: absolute; right: -11px; top: 50%; transform: translateY(-50%);
+  color: var(--accent); font-weight: 800; z-index: 1;
+}
+.flow li:last-child { border-color: var(--accent); }
+.guide-rule { margin: 6px 0 12px; font-size: .9rem; max-width: 90ch; }
+.guide-table td, .guide-table th { vertical-align: top; }
+@media (max-width: 560px) {
+  .flow { flex-direction: column; }
+  .flow li:not(:last-child)::after { content: "↓"; right: auto; left: 50%; top: auto; bottom: -13px; transform: translateX(-50%); }
+}
+@media (prefers-reduced-motion: reduce) { .guide summary::before { transition: none; } }
+
+/* Balanço e referências no topo das decisões */
+.snapshot { margin: 16px 0; }
+.snapshot-head { display: flex; gap: 4px 12px; align-items: baseline; flex-wrap: wrap; margin-bottom: 12px; }
+.snapshot-head h2 { margin: 0; }
+.snapshot-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 16px 24px; }
+.snapshot-grid > div { min-width: 0; }
+.snapshot-grid h3 small { font-weight: 400; font-size: .8rem; }

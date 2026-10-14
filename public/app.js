@@ -620,6 +620,8 @@ function renderDecisions(tab) {
     shares: `Cotação: ${money2(c.price)} · ${int(c.shares)} ações · recompra máx. ${int(c.shares * v.rules.config.maxBuybackPct)}`,
   };
   tab.innerHTML = `
+    ${guideBanner()}
+    ${companySnapshot(c, m)}
     <div class="decide">
       <form class="card" id="decision-form" novalidate>
         <h2>Suas 10 decisões para o período ${v.period}</h2>
@@ -645,18 +647,7 @@ function renderDecisions(tab) {
             <span>Juros básicos / período</span><span class="num">${pct(env.interestRate, 2)}</span>
           </div>
         </section>
-        <section class="card">
-          <h3>Sua empresa agora</h3>
-          <div class="kv">
-            <span>Cotação da ação</span><span class="num">${money2(c.price)} <small class="${cls(c.tsr)}">(${signPct(c.tsr)})</small></span>
-            <span>Caixa</span><span class="num">${money(c.cash)}</span>
-            <span>A receber (entra agora)</span><span class="num">${money(c.receivables)}</span>
-            <span>Estoque</span><span class="num">${int(c.inventoryUnits)} un.</span>
-            <span>Dívida</span><span class="num">${money(c.debt)}</span>
-            <span>Patrimônio líquido</span><span class="num">${money(c.equity)}</span>
-            <span>Reputação</span><span class="num">${pct(c.reputation, 0)}</span>
-          </div>
-        </section>
+        <section class="card" id="projection"><h3>Projeção do resultado</h3><p class="muted">Calculando…</p></section>
         <section class="card" id="budget"></section>
         <button class="btn primary block" id="submit-decisions">${v.myDecisions ? 'Atualizar decisões' : 'Enviar decisões'}</button>
         <p class="muted" style="margin:0;text-align:center;font-size:.85rem">${v.myDecisions ? '✓ Decisões enviadas. Aguardando os demais.' : 'Você ainda não enviou neste período.'}</p>
@@ -679,6 +670,10 @@ function renderDecisions(tab) {
       return;
     }
     renderBudget();
+    schedulePreview();
+  });
+  $('#guide')?.addEventListener('toggle', (e) => {
+    try { localStorage.setItem('bsim:guide-closed', e.target.open ? '0' : '1'); } catch { /* sem armazenamento */ }
   });
   form.addEventListener('submit', (e) => e.preventDefault());
   $('#submit-decisions').addEventListener('click', async () => {
@@ -698,6 +693,134 @@ function renderDecisions(tab) {
     }
   });
   renderBudget();
+  runPreview();
+}
+
+// ---------- banner "como as coisas se afetam" ----------
+const GUIDE_ROWS = [
+  ['Preço', 'Margem maior em cada unidade', 'Clientes migram para quem cobra menos; se todos sobem, o mercado encolhe', 'Na hora'],
+  ['Produção', 'Vende tudo o que a demanda pedir', 'Sobra vira estoque (R$ 2/un. por período) e prende caixa; falta derruba a reputação', 'Na hora'],
+  ['Marketing', 'Marca mais forte: mais clientes', 'Despesa que reduz o lucro já neste período', 'Acumula; perde 35% por período'],
+  ['P&D', 'Produto melhor: mais clientes', 'Despesa que reduz o lucro já neste período', 'Lento; dura bastante'],
+  ['Fábrica', 'Capacidade para vender mais', 'Sai do caixa agora; deprecia 5% por período', 'No próximo período'],
+  ['Salário', 'Produtividade e atendimento', 'Mão de obra e administração mais caras', 'Na hora'],
+  ['Prazo ao cliente', 'Atrai clientes', 'O dinheiro a prazo só entra no próximo período; aumenta o calote', 'Caixa no próximo'],
+  ['Empréstimo', 'Caixa para investir e evitar o emergencial', 'Juros todo período; dívida alta encarece os juros e assusta o mercado', 'Na hora'],
+  ['Dividendos', 'Somam direto na sua valorização', 'Reduzem caixa e patrimônio', 'Na hora'],
+  ['Emitir / recomprar ações', 'Emitir levanta caixa; recomprar concentra o lucro', 'Emitir dilui os sócios; recomprar gasta caixa', 'Na hora'],
+];
+
+function guideBanner() {
+  let closed = false;
+  try { closed = localStorage.getItem('bsim:guide-closed') === '1'; } catch { /* sem armazenamento */ }
+  const C = S.view.rules.config;
+  return `
+    <details class="card guide" id="guide" ${closed ? '' : 'open'}>
+      <summary><b>Como as coisas se afetam</b> <small class="muted">(toque para abrir ou recolher)</small></summary>
+      <ol class="flow" aria-label="Cadeia de efeitos">
+        <li><b>Suas decisões</b><small>preço, produção, investimentos…</small></li>
+        <li><b>Clientes e custos</b><small>quanto vende e quanto gasta</small></li>
+        <li><b>DRE</b><small>receita − custos = lucro</small></li>
+        <li><b>Balanço</b><small>caixa, dívida e patrimônio</small></li>
+        <li><b>Cotação da ação</b><small>o que decide o ranking</small></li>
+      </ol>
+      <p class="guide-rule">A ação sobe quando o lucro rende mais que <b>${pct(C.costOfEquity)} do patrimônio por período</b> (o custo de capital).
+      Crescer a receita ajuda; dívida alta, escândalos e prejuízo derrubam. Sua clientela depende do seu preço,
+      marca, qualidade, salário e prazo <b>comparados aos dos concorrentes</b>.</p>
+      <div class="table-scroll">
+        <table class="guide-table">
+          <thead><tr><th>Se você aumentar…</th><th>Ganha</th><th>Paga</th><th>Quando aparece</th></tr></thead>
+          <tbody>${GUIDE_ROWS.map(([k, gain, cost, when]) => `<tr><td><b>${esc(k)}</b></td><td>${esc(gain)}</td><td>${esc(cost)}</td><td class="muted">${esc(when)}</td></tr>`).join('')}</tbody>
+        </table>
+      </div>
+    </details>`;
+}
+
+// ---------- balanço e referências no topo das decisões ----------
+function companySnapshot(c, m) {
+  const v = S.view;
+  const C = v.rules.config;
+  const env = v.env;
+  const unitCostNow = unitCost(Math.min(10000, c.capacity), 100, env.materialMult);
+  const avgPrice = m ? m.price : C.refPrice;
+  const expectedDemand = (m ? m.mine.operations.demand : C.baseDemandPerCompany) * env.demandMult;
+  const assets = c.cash + c.receivables + c.inventoryValue + c.fixedAssets + (c.goodwill || 0);
+  return `
+    <section class="card snapshot">
+      <div class="snapshot-head">
+        <h2>Sua empresa no início do período ${v.period}</h2>
+        <small class="muted">Balanço patrimonial e números de referência para decidir</small>
+      </div>
+      <div class="snapshot-grid">
+        <div>
+          <h3>Ativo <small class="muted">o que a empresa tem</small></h3>
+          <div class="kv">
+            <span>Caixa</span><span class="num">${money(c.cash)}</span>
+            <span>A receber <small class="muted">(entra neste período)</small></span><span class="num">${money(c.receivables)}</span>
+            <span>Estoque <small class="muted">(${int(c.inventoryUnits)} un.)</small></span><span class="num">${money(c.inventoryValue)}</span>
+            <span>Fábrica <small class="muted">(${int(c.capacity)} un./período)</small></span><span class="num">${money(c.fixedAssets)}</span>
+            ${c.goodwill ? `<span>Ágio de aquisições</span><span class="num">${money(c.goodwill)}</span>` : ''}
+            <span class="total">Total do ativo</span><span class="num total">${money(assets)}</span>
+          </div>
+        </div>
+        <div>
+          <h3>Passivo + PL <small class="muted">quem financia</small></h3>
+          <div class="kv">
+            <span>Empréstimos <small class="muted">(juros ${pct(v.myInterestRate ?? env.interestRate, 2)})</small></span><span class="num">${money(c.debt)}</span>
+            <span>Patrimônio líquido</span><span class="num">${money(c.equity)}</span>
+            <span class="total">Total</span><span class="num total">${money(c.debt + c.equity)}</span>
+          </div>
+          <div class="kv" style="margin-top:10px">
+            <span>Cotação da ação</span><span class="num">${money2(c.price)} <small class="${cls(c.tsr)}">(${signPct(c.tsr)})</small></span>
+            <span>Valor patrimonial por ação</span><span class="num">${money2(c.equity / c.shares)}</span>
+            <span>Limite de crédito livre</span><span class="num">${money(Math.max(0, c.creditLimit - c.debt))}</span>
+          </div>
+        </div>
+        <div>
+          <h3>Referências <small class="muted">para este período</small></h3>
+          <div class="kv">
+            <span>Demanda esperada</span><span class="num">≈ ${int(expectedDemand)} un.</span>
+            <span>Preço médio do mercado</span><span class="num">${money2(avgPrice)}</span>
+            <span>Custo para produzir 1 un.</span><span class="num">≈ ${money2(unitCostNow)}</span>
+            <span>Despesas fixas (adm. + depreciação)</span><span class="num">≈ ${money(C.adminFixed + C.adminSalaryLinked + c.fixedAssets * C.depreciationRate)}</span>
+            ${m ? `<span>Seu último lucro líquido</span><span class="num ${cls(m.mine.income.netIncome)}">${money(m.mine.income.netIncome)}</span>` : ''}
+            <span>Reputação</span><span class="num">${pct(c.reputation, 0)}</span>
+          </div>
+        </div>
+      </div>
+    </section>`;
+}
+
+// ---------- projeção do resultado ----------
+function schedulePreview() {
+  clearTimeout(S.previewTimer);
+  S.previewTimer = setTimeout(runPreview, 350);
+}
+
+async function runPreview() {
+  const seq = (S.previewSeq = (S.previewSeq || 0) + 1);
+  let p;
+  try {
+    p = await api('POST', `/api/games/${S.code}/preview`, { token: S.token, decisions: S.draft, moves: S.moves });
+  } catch {
+    return;
+  }
+  const el = $('#projection');
+  if (!el || seq !== S.previewSeq) return;
+  el.innerHTML = `
+    <h3>Projeção do resultado</h3>
+    <p class="muted" style="margin:0 0 8px;font-size:.82rem">Se os concorrentes repetirem o último período.</p>
+    <div class="kv">
+      <span>Vendas</span><span class="num">${int(p.operations.sales)} un. <small class="muted">(${pct(p.operations.marketShare, 0)})</small></span>
+      ${p.operations.unmet > 0 ? `<span>Faltaria produto</span><span class="num bad">${int(p.operations.unmet)} un.</span>` : ''}
+      <span>Receita</span><span class="num">${money(p.income.revenue)}</span>
+      <span>Lucro líquido</span><span class="num ${cls(p.income.netIncome)}"><b>${money(p.income.netIncome)}</b></span>
+      <span>Caixa no fim</span><span class="num">${money(p.balance.cash)}</span>
+      <span>Estoque no fim</span><span class="num">${int(p.operations.inventoryUnits)} un.</span>
+      <span class="total">Cotação estimada</span><span class="num total">${money2(p.stock.price)} <small class="${cls(p.stock.change)}">(${signPct(p.stock.change)})</small></span>
+    </div>
+    ${p.emergencyLoan > 0 ? `<div class="warn">Pela projeção, o caixa fica negativo: empréstimo emergencial de ${money(p.emergencyLoan)} com multa.</div>` : ''}
+    <p class="muted" style="margin:8px 0 0;font-size:.78rem">Estimativa sem sorte ou azar, sem leilão e sem a chance de ser pego. O resultado real depende das decisões dos concorrentes neste período.</p>`;
 }
 
 function emptyMoves() {
@@ -736,8 +859,9 @@ function renderMovesSection() {
       <div class="move shady">
         <h3>🕶️ Bastidores (práticas ilegais)</h3>
         <p class="help">Retorno rápido, mas cada período em uso aumenta o risco de ser pego. Se descoberto: multa de
-        ${C.fineMultiplier}× tudo o que ganhou com a prática + ${money(C.fixedFine)}, queda da ação, reputação arranhada e
-        ${C.investigationPeriods} períodos sob investigação. Ganhos não punidos continuam expostos mesmo depois de parar.
+        ${C.fineMultiplier}× tudo o que ganhou com a prática + ${money(C.fixedFine)} (em dobro para reincidentes), tombo na
+        bolsa, clientes perdendo a confiança, ${C.investigationPeriods} períodos sob investigação e um desconto permanente de
+        ${pct(C.governanceDiscount, 0)} na ação por condenação. Ganhos não punidos continuam expostos mesmo depois de parar.
         Ninguém vê suas escolhas — a não ser que você seja pego.</p>
         ${me.investigation > 0 ? `<div class="warn">Sua empresa está sob investigação por mais ${me.investigation} período(s): riscos 50% maiores.</div>` : ''}
         ${v.period >= v.settings.totalPeriods ? `<div class="warn">Último período: auditoria de encerramento (+${pct(C.finalAuditRisk, 0)} de risco em tudo que estiver exposto).</div>` : ''}
@@ -889,6 +1013,20 @@ function renderResults(tab) {
     </div>
     <div class="grid-3" style="margin-top:16px">
       <section class="card">
+        <h3>Balanço patrimonial</h3>
+        <table><tbody>
+          ${row('Caixa', b.cash)}
+          ${row('Contas a receber', b.receivables)}
+          ${row('Estoques', b.inventory)}
+          ${row('Imobilizado (fábrica)', b.fixedAssets)}
+          ${b.goodwill ? row('Ágio de aquisições', b.goodwill) : ''}
+          ${row('Total do ativo', b.totalAssets, { strong: true })}
+          ${row('Empréstimos', b.debt)}
+          ${row('Patrimônio líquido', b.equity, { color: true })}
+          ${row('Total passivo + PL', b.totalLiabilitiesAndEquity, { strong: true })}
+        </tbody></table>
+      </section>
+      <section class="card">
         <h3>DRE — Demonstração do Resultado</h3>
         <table><tbody>
           ${row('Receita de vendas', i.revenue)}
@@ -910,20 +1048,6 @@ function renderResults(tab) {
           ${i.reward ? row('(+) Recompensa por denúncia', i.reward) : ''}
           ${i.emergencyFee ? row('(−) Multa do empréstimo emergencial', neg(i.emergencyFee)) : ''}
           ${row('= Lucro líquido', i.netIncome, { strong: true, color: true })}
-        </tbody></table>
-      </section>
-      <section class="card">
-        <h3>Balanço patrimonial</h3>
-        <table><tbody>
-          ${row('Caixa', b.cash)}
-          ${row('Contas a receber', b.receivables)}
-          ${row('Estoques', b.inventory)}
-          ${row('Imobilizado (fábrica)', b.fixedAssets)}
-          ${b.goodwill ? row('Ágio de aquisições', b.goodwill) : ''}
-          ${row('Total do ativo', b.totalAssets, { strong: true })}
-          ${row('Empréstimos', b.debt)}
-          ${row('Patrimônio líquido', b.equity, { color: true })}
-          ${row('Total passivo + PL', b.totalLiabilitiesAndEquity, { strong: true })}
         </tbody></table>
       </section>
       <section class="card">
@@ -973,7 +1097,7 @@ function eventBanners(r, companyId) {
   if (!ev) return '';
   const name = esc(companyName(companyId));
   if (ev.acquired) out.push(`🏢 ${name} comprou <b>${esc(ev.acquired.name)}</b> por ${money(ev.acquired.price)}.`);
-  for (const sc of ev.scandals) out.push(`🚔 ${name} foi pega por <b>${esc(sc.label)}</b>${sc.reported ? ' após denúncia' : ''}: multa de ${money(sc.fine)}.`);
+  for (const sc of ev.scandals) out.push(`🚔 ${name} foi pega por <b>${esc(sc.label)}</b>${sc.reported ? ' após denúncia' : ''}: multa de ${money(sc.fine)}${sc.repeatOffender ? ' (reincidente: multa em dobro)' : ''}.`);
   if (ev.reportsReceived && !ev.scandals.length) out.push(`📨 ${name} recebeu ${ev.reportsReceived} denúncia(s) anônima(s), que foram arquivadas.`);
   return out.map((x) => `<div class="card banner">${x}</div>`).join('');
 }
@@ -1253,7 +1377,9 @@ function renderHelp(tab) {
       maquiagem contábil). Cada um tem uma chance de ser descoberto a cada período, que cresce quanto mais tempo você usa.
       O que você ganhou e não foi punido continua exposto mesmo depois de parar, e no último período há uma
       <b>auditoria de encerramento</b> (+${pct(C.finalAuditRisk, 0)} de risco). Se for pego: multa de ${C.fineMultiplier}× o ganho
-      acumulado + ${money(C.fixedFine)}, queda da ação, reputação menor e ${C.investigationPeriods} períodos sob investigação.</p>
+      acumulado + ${money(C.fixedFine)} (em dobro para reincidentes), tombo na bolsa, reputação menor, ${C.investigationPeriods}
+      períodos sob investigação e um desconto permanente de ${pct(C.governanceDiscount, 0)} no valor da ação por condenação
+      (até ${pct(0.15, 0)}).</p>
       <p>Qualquer CEO pode <b>denunciar</b> um concorrente por período (custa ${money(C.reportCost)}). Cada denúncia aumenta em
       ${pct(C.reportDetectionBoost, 0)} a chance de descoberta; se o denunciado for pego, o denunciante recebe ${money(C.reportReward)}.
       As escolhas ilegais e as denúncias são secretas: só os escândalos viram notícia. Dica: analise os demonstrativos públicos —
