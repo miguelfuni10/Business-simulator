@@ -220,3 +220,26 @@ test('prazo inválido é recusado', () => {
   assert.ok(PERIOD_MINUTES.includes(60));
   assert.throws(() => createGame(never, { name: 'A', companyName: 'B', totalPeriods: 3, mode: 'timer', periodMinutes: 7 }), /Prazo/);
 });
+
+test('servidor de bolso (versão de teste) atende as mesmas rotas no navegador', async () => {
+  const mem = new Map();
+  const storage = { getItem: (k) => mem.get(k) ?? null, setItem: (k, v) => mem.set(k, v) };
+  const { createLocalApi } = await import('../src/local-api.js');
+  const api = createLocalApi(storage);
+  const { code, token } = await api('POST', '/api/games', { name: 'Ana', companyName: 'Alfa', totalPeriods: 3, mode: 'live' });
+  const bia = await api('POST', `/api/games/${code}/join`, { name: 'Bia', companyName: 'Beta' });
+  await api('POST', `/api/games/${code}/bots`, { token, profile: 'agressiva' });
+  await api('POST', `/api/games/${code}/start`, { token });
+  assert.deepEqual(api.humans(code).map((h) => h.companyName), ['Alfa', 'Beta']);
+  await api('POST', `/api/games/${code}/decisions`, { token, period: 1, decisions: { price: 62 } });
+  await api('POST', `/api/games/${code}/decisions`, { token: bia.token, period: 1, decisions: {} });
+  const view = await api('GET', `/api/games/${code}?token=${token}`);
+  assert.equal(view.period, 2);
+  view.history.length = 0; // o cliente mexer na visão não pode afetar o jogo
+  assert.equal((await api('GET', `/api/games/${code}?token=${token}`)).history.length, 1);
+  await assert.rejects(api('GET', `/api/games/${code}?token=errado`), (err) => err.status === 403);
+
+  // recarregar a página: a partida volta do armazenamento do navegador
+  const reloaded = createLocalApi(storage);
+  assert.equal((await reloaded('GET', `/api/games/${code}?token=${token}`)).period, 2);
+});

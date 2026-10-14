@@ -8,7 +8,8 @@
     "start": "node server.js",
     "test": "node --test",
     "simulate": "node scripts/simulate.js",
-    "demo": "node scripts/demo.js"
+    "demo": "node scripts/demo.js",
+    "build:artifact": "node scripts/build-artifact.js"
   },
   "engines": {
     "node": ">=18"

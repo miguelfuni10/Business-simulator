@@ -58,7 +58,38 @@ function forgetGame(code) {
   } catch { /* armazenamento indisponível */ }
 }
 
+// Versão de teste (artefato): o jogo inteiro roda no navegador, sem servidor.
+const LOCAL = typeof window.LOCAL_API === 'function' ? window.LOCAL_API : null;
+
+function setUrl(url) {
+  try { history.replaceState(null, '', url); } catch { /* ambiente sem histórico (ex.: artefato) */ }
+}
+
+/** Confirmação dentro da página (o navegador do artefato não exibe confirm()). */
+function askConfirm(message, okLabel = 'Confirmar') {
+  return new Promise((resolve) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'modal-backdrop';
+    wrap.innerHTML = `
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-text">
+        <p id="modal-text">${esc(message)}</p>
+        <div class="modal-actions">
+          <button class="btn" id="modal-cancel">Cancelar</button>
+          <button class="btn primary" id="modal-ok">${esc(okLabel)}</button>
+        </div>
+      </div>`;
+    const close = (answer) => { wrap.remove(); resolve(answer); };
+    wrap.addEventListener('click', (e) => { if (e.target === wrap) close(false); });
+    wrap.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(false); });
+    document.body.append(wrap);
+    $('#modal-cancel', wrap).addEventListener('click', () => close(false));
+    $('#modal-ok', wrap).addEventListener('click', () => close(true));
+    $('#modal-ok', wrap).focus();
+  });
+}
+
 async function api(method, url, body) {
+  if (LOCAL) return LOCAL(method, url, body);
   const res = await fetch(url, {
     method,
     headers: body ? { 'Content-Type': 'application/json' } : undefined,
@@ -105,7 +136,7 @@ function boot() {
 function renderHome(prefillCode = '') {
   stopPolling();
   S.view = null;
-  if (location.search) history.replaceState(null, '', location.pathname);
+  if (location.search) setUrl(location.pathname);
   const saved = Object.entries(savedGames()).sort((a, b) => b[1].savedAt - a[1].savedAt).slice(0, 6);
   $('#app').innerHTML = `
     <div class="wrap">
@@ -115,8 +146,17 @@ function renderHome(prefillCode = '') {
         e dispute o mercado com seus amigos. No fim, vence quem entregar a <b>maior valorização da ação</b>.</p>
       </section>
 
+      ${LOCAL ? `
+      <section class="card localbar-home">
+        <div>
+          <h2>Versão de teste</h2>
+          <p class="muted" style="margin:0">Aqui o jogo roda inteiro neste navegador, sem servidor. Jogue contra robôs ou crie
+          vários jogadores e alterne entre eles no mesmo aparelho. Para jogar com amigos, cada um no seu celular, publique o site.</p>
+        </div>
+        <button class="btn primary" id="quick-start">Partida rápida: você + 3 robôs</button>
+      </section>` : ''}
       ${saved.length ? `
-      <section class="card">
+      <section class="card" style="margin-top:16px">
         <h2>Suas partidas</h2>
         <div class="statusbar">
           ${saved.map(([code, g]) => `<button class="btn small" data-resume="${esc(code)}">${esc(code)} · ${esc(g.companyName)}</button>`).join('')}
@@ -217,7 +257,7 @@ async function enterGame(code) {
   S.view = null;
   S.draft = null;
   S.tab = 'decisions';
-  history.replaceState(null, '', `?jogo=${code}`);
+  if (!LOCAL) setUrl(`?jogo=${code}`);
   try {
     await refresh();
     startPolling();
@@ -300,14 +340,15 @@ function render() {
       <span><span class="dot" style="background:${companyColor(me.id)}"></span><b>${esc(me.companyName)}</b> <small>· ${esc(me.name)}</small></span>
     </div></div>
     <div class="wrap">
+      ${localBar()}
       <div id="status"></div>
       <nav class="tabs">${tabs.map(([k, label]) => `<button data-tab="${k}" class="${S.tab === k ? 'active' : ''}">${label}</button>`).join('')}</nav>
       <main id="tab"></main>
       <footer>Código da partida: <b>${esc(v.code)}</b> · <button class="link-btn" id="leave">Sair desta partida neste navegador</button></footer>
     </div>`;
   $('#home-link').addEventListener('click', (e) => { e.preventDefault(); renderHome(); });
-  $('#leave').addEventListener('click', () => {
-    if (confirm('Remover o acesso a esta partida deste navegador? Você não conseguirá voltar sem o link de acesso.')) {
+  $('#leave').addEventListener('click', async () => {
+    if (await askConfirm('Remover o acesso a esta partida deste navegador? Você não conseguirá voltar sem o link de acesso.', 'Sair da partida')) {
       forgetGame(v.code);
       renderHome();
     }
@@ -341,7 +382,7 @@ function renderStatus() {
     const msg = missing > 0
       ? `${missing} CEO(s) ainda não enviaram. Eles repetirão as decisões do período anterior. Fechar o período ${v.period} agora?`
       : `Fechar o período ${v.period} agora?`;
-    if (!confirm(msg)) return;
+    if (!(await askConfirm(msg, 'Fechar período'))) return;
     try {
       await api('POST', `/api/games/${S.code}/close`, { token: S.token });
       await refresh();
@@ -374,15 +415,17 @@ function renderLobby() {
       <span class="pill">Sala de espera</span>
     </div></div>
     <div class="wrap" style="margin-top:24px">
+      ${localBar()}
       <div class="grid-2">
         <section class="card">
           <h2>Convide seus amigos</h2>
           <p class="muted">Envie o link ou o código. Cada um entra com o próprio nome e empresa.</p>
           <div class="code-big">${esc(v.code)}</div>
+          ${LOCAL ? '<p class="muted">Na versão de teste, todos jogam neste aparelho: adicione jogadores na barra acima e alterne entre eles.</p>' : `
           <div class="share-link" style="margin-top:12px">
             <input readonly value="${esc(link)}" id="share-url">
             <button class="btn" id="copy-link">Copiar</button>
-          </div>
+          </div>`}
           <p class="muted" style="margin-top:16px">
             ${v.settings.totalPeriods} períodos ·
             ${deadlineText(v.settings)}
@@ -414,12 +457,77 @@ function renderLobby() {
       </div>
     </div>`;
   $('#home-link').addEventListener('click', (e) => { e.preventDefault(); renderHome(); });
-  $('#copy-link').addEventListener('click', async () => {
+  $('#copy-link')?.addEventListener('click', async () => {
     try { await navigator.clipboard.writeText(link); toast('Link copiado!'); } catch { $('#share-url').select(); }
   });
   $('#add-bot')?.addEventListener('click', () => hostAction('bots', { profile: $('#bot-profile').value }));
   $('#start')?.addEventListener('click', () => hostAction('start', {}));
   $$('[data-remove]').forEach((b) => b.addEventListener('click', () => hostAction('remove', { playerId: b.dataset.remove })));
+}
+
+// ---------- versão de teste (artefato) ----------
+function localBar() {
+  if (!LOCAL || !S.code) return '';
+  const humans = LOCAL.humans(S.code);
+  const inLobby = S.view?.status === 'lobby';
+  return `
+    <div class="card localbar">
+      <span class="pill"><b>Modo teste</b></span>
+      <label for="local-player" class="inline">Jogando como
+        <select id="local-player">
+          ${humans.map((h) => `<option value="${h.id}" ${h.token === S.token ? 'selected' : ''}>${esc(h.companyName)} (${esc(h.name)})</option>`).join('')}
+        </select>
+      </label>
+      ${inLobby ? `
+        <span class="localbar-add">
+          <input id="local-name" placeholder="Nome do jogador" maxlength="30" aria-label="Nome do jogador">
+          <input id="local-company" placeholder="Empresa" maxlength="30" aria-label="Nome da empresa">
+          <button class="btn small" id="local-add">+ Jogador humano</button>
+        </span>` : '<small class="muted">Troque de jogador para tomar as decisões de cada um.</small>'}
+    </div>`;
+}
+
+function switchLocalPlayer(id) {
+  const h = LOCAL.humans(S.code).find((x) => x.id === id);
+  if (!h) return;
+  saveGame(S.code, h.token, h.companyName);
+  S.token = h.token;
+  S.view = null;
+  S.draft = null;
+  S.selCompany = null;
+  S.tab = 'decisions';
+  window.scrollTo(0, 0);
+  refresh().then(() => toast(`Agora você joga como ${h.companyName}.`)).catch((err) => toast(err.message, true));
+}
+
+async function addLocalPlayer() {
+  try {
+    await api('POST', `/api/games/${S.code}/join`, { name: $('#local-name').value, companyName: $('#local-company').value });
+    await refresh();
+  } catch (err) { toast(err.message, true); }
+}
+
+async function quickStart() {
+  try {
+    const r = await api('POST', '/api/games', {
+      name: 'Você', companyName: 'Minha Empresa', totalPeriods: 5, mode: 'live',
+      allowAcquisitions: true, allowIllegal: true,
+    });
+    for (const profile of ['equilibrada', 'agressiva', 'inovadora']) {
+      await api('POST', `/api/games/${r.code}/bots`, { token: r.token, profile });
+    }
+    await api('POST', `/api/games/${r.code}/start`, { token: r.token });
+    saveGame(r.code, r.token, 'Minha Empresa');
+    enterGame(r.code);
+  } catch (err) { toast(err.message, true); }
+}
+
+if (LOCAL) {
+  document.addEventListener('change', (e) => { if (e.target.id === 'local-player') switchLocalPlayer(e.target.value); });
+  document.addEventListener('click', (e) => {
+    if (e.target.id === 'local-add') addLocalPlayer();
+    if (e.target.id === 'quick-start') quickStart();
+  });
 }
 
 async function hostAction(action, body) {

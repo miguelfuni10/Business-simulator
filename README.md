@@ -75,6 +75,7 @@ npm start          # http://localhost:3000
 npm test           # testes do motor contábil, das regras e da API
 npm run simulate   # 200 partidas só com robôs, para conferir o balanceamento
 npm run demo       # partida de teste com 3 rodadas, mostrando leilão, trapaça e denúncia
+npm run build:artifact  # gera dist/simulador-teste.html: versão de teste que roda sem servidor
 ```
 
 Variáveis de ambiente: `PORT` (padrão 3000), `DATA_FILE` (padrão `data/games.json`) e, para guardar as partidas
@@ -106,6 +107,13 @@ Como funciona no plano gratuito:
 Sem as variáveis do Upstash, o jogo salva em `data/games.json`. Isso serve para rodar no seu computador ou num
 servidor com disco persistente (o `Dockerfile` usa `/data`).
 
+### Versão de teste sem servidor
+
+`npm run build:artifact` gera um único arquivo HTML com o jogo inteiro rodando no navegador (o mesmo motor,
+com um "servidor de bolso" em `src/local-api.js`). Serve para experimentar contra robôs ou com vários jogadores
+alternando no mesmo aparelho, e pode ser publicado como artefato no Claude. Para jogar com amigos, cada um no seu
+celular, é preciso publicar o site com servidor.
+
 ### Outras opções
 
 - **Seu computador + túnel**: `npm start` e `cloudflared tunnel --url http://localhost:3000` geram um link
@@ -121,6 +129,8 @@ src/bots.js          empresas-robô
 src/game.js          regras da partida: sala, envio de decisões, fechamento de períodos
 src/store.js         persistência (arquivo JSON ou Upstash Redis)
 render.yaml          implantação gratuita no Render
+src/local-api.js     rotas do servidor rodando no navegador (versão de teste)
+scripts/build-artifact.js  empacota a versão de teste num único HTML
 public/              front-end (HTML/CSS/JS puro)
 test/                testes (node --test)
 scripts/simulate.js  simulação de balanceamento
