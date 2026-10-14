@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import {
-  addBot, closePeriod, createGame, joinGame, nextDailyDeadline, runDeadlines, startGame, submitDecisions, viewFor,
+  PERIOD_MINUTES, addBot, closePeriod, createGame, joinGame, nextDailyDeadline, runDeadlines, startGame, submitDecisions, viewFor,
 } from '../src/game.js';
 import { MemoryStore, RedisStore } from '../src/store.js';
 import { createServer } from '../server.js';
@@ -55,7 +55,7 @@ test('modo diário fecha no horário e respeita intervalo mínimo', () => {
   const late = Date.UTC(2026, 0, 11, 0, 30);
   assert.equal(nextDailyDeadline(22, 180, late), Date.UTC(2026, 0, 12, 1, 0));
 
-  const { game, player: host } = createGame(never, { name: 'Ana', companyName: 'Alfa', totalPeriods: 5, mode: 'daily', dailyCloseHour: 22, tzOffset: 180 });
+  const { game, player: host } = createGame(never, { name: 'Ana', companyName: 'Alfa', totalPeriods: 5, mode: 'daily', dailyCloseHour: 22, tzOffset: 180, closeEarly: false });
   addBot(game, host, 'conservadora');
   startGame(game, host, now);
   submitDecisions(game, host, { period: 1, decisions: {} }, now);
@@ -178,4 +178,45 @@ test('RedisStore grava e recarrega partidas pela API REST do Upstash', async () 
   await b.load();
   assert.equal(b.get(game.code).version, 7);
   assert.equal(b.get(game.code).players[0].companyName, 'Alfa');
+});
+
+test('cronômetro: cada período tem prazo; fecha antes se todos enviarem (quando ligado)', () => {
+  const now = Date.UTC(2026, 0, 10, 10, 0);
+  const min = 60_000;
+  const { game, player: host } = createGame(never, { name: 'Ana', companyName: 'Alfa', totalPeriods: 4, mode: 'timer', periodMinutes: 30 });
+  const bia = joinGame(game, { name: 'Bia', companyName: 'Beta' });
+  startGame(game, host, now);
+  assert.equal(game.nextDeadline, now + 30 * min);
+
+  // ninguém enviou: o prazo vence e o período fecha repetindo as decisões
+  assert.equal(runDeadlines(game, now + 30 * min), true);
+  assert.equal(game.period, 2);
+  assert.equal(game.nextDeadline, now + 60 * min);
+
+  // todos enviaram antes do prazo: fecha na hora e o novo prazo conta a partir daí
+  submitDecisions(game, host, { period: 2, decisions: {} }, now + 40 * min);
+  submitDecisions(game, bia, { period: 2, decisions: {} }, now + 45 * min);
+  assert.equal(game.period, 3);
+  assert.equal(game.nextDeadline, now + 75 * min);
+
+  // servidor dormiu 5 horas: fecha só o período vencido e dá um prazo cheio para o próximo
+  assert.equal(runDeadlines(game, now + 6 * 60 * min), true);
+  assert.equal(game.period, 4);
+  assert.equal(game.nextDeadline, now + 6 * 60 * min + 30 * min);
+});
+
+test('cronômetro sem fechamento antecipado espera o prazo mesmo com todos prontos', () => {
+  const now = Date.UTC(2026, 0, 10, 10, 0);
+  const { game, player: host } = createGame(never, { name: 'Ana', companyName: 'Alfa', totalPeriods: 3, mode: 'timer', periodMinutes: 10, closeEarly: false });
+  addBot(game, host, 'equilibrada');
+  startGame(game, host, now);
+  submitDecisions(game, host, { period: 1, decisions: {} }, now + 60_000);
+  assert.equal(game.period, 1);
+  runDeadlines(game, now + 10 * 60_000);
+  assert.equal(game.period, 2);
+});
+
+test('prazo inválido é recusado', () => {
+  assert.ok(PERIOD_MINUTES.includes(60));
+  assert.throws(() => createGame(never, { name: 'A', companyName: 'B', totalPeriods: 3, mode: 'timer', periodMinutes: 7 }), /Prazo/);
 });

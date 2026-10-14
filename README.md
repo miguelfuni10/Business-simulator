@@ -12,10 +12,14 @@ e, a cada período contábil, tomam **10 decisões**. No fim, vence quem entrega
 3. Quando o período fecha, saem a **DRE**, o **balanço**, o **fluxo de caixa**, os indicadores e a nova **cotação** de todas
    as empresas (os demonstrativos são públicos, como numa empresa de capital aberto).
 
-**Ritmos de jogo**
+**Prazo de cada período**
 
-- **Diário**: 1 período por dia, que fecha automaticamente num horário escolhido (ex.: 22h). O anfitrião pode fechar antes.
-- **Ao vivo**: o período fecha assim que todos enviam. Bom para jogar tudo numa noite.
+Ninguém precisa jogar ao mesmo tempo. Cada período tem um prazo (de 5 minutos a 24 horas, ou todo dia num horário
+fixo). Até o prazo acabar, cada CEO envia e pode alterar suas decisões quando quiser. No fim do prazo o jogo consolida
+tudo e revela os resultados e o ranking, mostrando quem subiu e quem caiu. Se a opção estiver ligada, o período fecha
+antes quando todos já enviaram. O anfitrião também pode fechar a qualquer momento.
+
+Sugestões: **10 a 30 minutos** para jogar numa noite; **24 horas** (ou "todo dia às 22h") para uma rodada por dia.
 
 ### As 10 decisões
 
@@ -94,8 +98,8 @@ Como funciona no plano gratuito:
 
 - O site **dorme após 15 minutos sem acesso** e leva cerca de 1 minuto para acordar no próximo acesso.
   As partidas não se perdem, porque ficam no Upstash.
-- No modo **diário**, se o servidor estiver dormindo no horário de fechamento, o período é fechado assim que alguém
-  abrir o site. O resultado é o mesmo, e o ritmo de um período por dia é mantido.
+- Se o servidor estiver dormindo quando o prazo acabar, o período é fechado assim que alguém abrir o site.
+  O resultado é o mesmo, e no modo "todo dia num horário" o ritmo de um período por dia é mantido.
 - Os limites gratuitos (750 horas de servidor por mês no Render e 500 mil comandos por mês no Upstash) sobram
   para partidas entre amigos.
 
@@ -105,7 +109,7 @@ servidor com disco persistente (o `Dockerfile` usa `/data`).
 ### Outras opções
 
 - **Seu computador + túnel**: `npm start` e `cloudflared tunnel --url http://localhost:3000` geram um link
-  público, que só funciona com o computador ligado. Bom para uma partida ao vivo numa noite.
+  público, que só funciona com o computador ligado. Bom para uma partida de prazos curtos numa noite.
 - **Mesma rede Wi-Fi**: `npm start` e os amigos acessam `http://SEU-IP:3000`.
 
 ## Estrutura

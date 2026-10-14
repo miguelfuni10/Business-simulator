@@ -191,6 +191,9 @@ tr.me td { background: var(--surface-2); }
 .check input { width: auto; margin-top: 4px; flex: none; }
 .practice { padding: 8px 0; border-bottom: 1px dashed var(--border); margin: 0; }
 .banner { margin-top: 12px; padding: 12px 16px; }
+.reveal { display: flex; gap: 20px; align-items: center; margin-top: 16px; border-left: 4px solid var(--accent); }
+.reveal-rank { font-size: 2.6rem; font-weight: 800; line-height: 1; white-space: nowrap; }
+.reveal-rank small { font-size: .9rem; font-weight: 600; color: var(--muted); }
 footer { color: var(--muted); font-size: .8rem; text-align: center; padding: 32px 0; }
 
 @media (max-width: 900px) {
@@ -200,4 +203,5 @@ footer { color: var(--muted); font-size: .8rem; text-align: center; padding: 32p
 @media (max-width: 560px) {
   .field { grid-template-columns: 1fr; }
   .podium > div { width: 30%; }
+  .reveal { flex-direction: column; align-items: flex-start; gap: 8px; }
 }

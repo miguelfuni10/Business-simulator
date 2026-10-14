@@ -79,6 +79,21 @@ function companyColor(id) {
 }
 const companyName = (id) => S.view.players.find((p) => p.id === id)?.companyName ?? '?';
 
+const DEADLINE_OPTIONS = [
+  ['5', '5 minutos'], ['10', '10 minutos'], ['15', '15 minutos'], ['30', '30 minutos'],
+  ['60', '1 hora'], ['120', '2 horas'], ['240', '4 horas'], ['480', '8 horas'], ['720', '12 horas'],
+  ['1440', '24 horas'], ['daily', 'Todo dia num horário fixo'], ['none', 'Sem prazo (espera todos)'],
+];
+
+function deadlineText(st) {
+  const early = st.closeEarly ?? st.mode === 'live';
+  let text;
+  if (st.mode === 'daily') text = `prazo: todo dia às ${String(st.dailyCloseHour).padStart(2, '0')}:00`;
+  else if (st.mode === 'timer') text = `prazo de ${DEADLINE_OPTIONS.find(([v]) => Number(v) === st.periodMinutes)?.[1] ?? `${st.periodMinutes} min`} por período`;
+  else return 'sem prazo: o período fecha quando todos enviarem';
+  return `${text}${early ? ' (ou antes, se todos enviarem)' : ''}`;
+}
+
 // ---------- início ----------
 function boot() {
   const params = new URLSearchParams(location.search);
@@ -121,13 +136,13 @@ function renderHome(prefillCode = '') {
                 ${[5, 8, 10, 12, 15, 20, 30].map((n) => `<option value="${n}" ${n === 10 ? 'selected' : ''}>${n} períodos</option>`).join('')}
               </select>
             </label>
-            <label>Ritmo
-              <select name="mode">
-                <option value="daily">Diário: 1 período por dia</option>
-                <option value="live">Ao vivo: fecha quando todos enviarem</option>
+            <label>Prazo de cada período
+              <select name="deadline">
+                ${DEADLINE_OPTIONS.map(([value, label]) => `<option value="${value}" ${value === '1440' ? 'selected' : ''}>${label}</option>`).join('')}
               </select>
             </label>
           </div>
+          <label class="check" id="early-field"><input type="checkbox" name="closeEarly" checked> Fechar antes do prazo quando todos enviarem</label>
           <label id="hour-field">Horário de fechamento diário
             <select name="dailyCloseHour">
               ${Array.from({ length: 24 }, (_, h) => `<option value="${h}" ${h === 22 ? 'selected' : ''}>${String(h).padStart(2, '0')}:00</option>`).join('')}
@@ -151,22 +166,29 @@ function renderHome(prefillCode = '') {
 
       <section class="grid-3 steps">
         <div class="card step"><b>1. Monte a sala</b>Crie a partida, mande o link para os amigos e, se quiser, complete a mesa com empresas-robô.</div>
-        <div class="card step"><b>2. Decida</b>Em cada período (um dia, ou uma rodada ao vivo) cada CEO envia suas 10 decisões. Todos disputam o mesmo mercado.</div>
-        <div class="card step"><b>3. Analise</b>Ao fechar o período saem a DRE, o balanço, o fluxo de caixa e a nova cotação de cada empresa. Ajuste a estratégia!</div>
+        <div class="card step"><b>2. Decida no seu tempo</b>Cada período tem um prazo. Até ele acabar, cada CEO envia (e pode mudar) suas 10 decisões, quando e de onde quiser. Ninguém precisa estar online junto.</div>
+        <div class="card step"><b>3. A revelação</b>No fim do prazo o jogo consolida tudo: saem a DRE, o balanço, a nova cotação e o ranking. Veja quem subiu e ajuste a estratégia!</div>
       </section>
       <footer>Partidas ficam salvas no servidor; seu acesso fica salvo neste navegador.</footer>
     </div>`;
 
   const createForm = $('#create-form');
-  const syncMode = () => { $('#hour-field').style.display = createForm.mode.value === 'daily' ? '' : 'none'; };
-  createForm.mode.addEventListener('change', syncMode);
+  const syncMode = () => {
+    $('#hour-field').style.display = createForm.deadline.value === 'daily' ? '' : 'none';
+    $('#early-field').style.display = createForm.deadline.value === 'none' ? 'none' : '';
+  };
+  createForm.deadline.addEventListener('change', syncMode);
   syncMode();
   createForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     const f = Object.fromEntries(new FormData(createForm));
     try {
+      const dl = createForm.deadline.value;
       const r = await api('POST', '/api/games', {
         ...f,
+        mode: dl === 'daily' ? 'daily' : dl === 'none' ? 'live' : 'timer',
+        periodMinutes: Number(dl) || null,
+        closeEarly: createForm.closeEarly.checked,
         allowAcquisitions: createForm.allowAcquisitions.checked,
         allowIllegal: createForm.allowIllegal.checked,
         tzOffset: new Date().getTimezoneOffset(),
@@ -235,6 +257,8 @@ function onViewChange(prev) {
   const periodClosed = prev && prev.history.length < v.history.length;
   if (periodClosed) {
     S.selPeriod = null;
+    S.selCompany = null;
+    window.scrollTo(0, 0);
     if (v.status === 'finished') {
       S.tab = 'market';
       toast('Fim de jogo! Confira o ranking final.');
@@ -335,7 +359,8 @@ function updateClock() {
   const m = Math.floor((ms % 3.6e6) / 6e4);
   const s = Math.floor((ms % 6e4) / 1000);
   const when = new Date(v.nextDeadline).toLocaleString('pt-BR', { weekday: 'short', hour: '2-digit', minute: '2-digit' });
-  el.textContent = `⏰ Fecha ${when} (em ${h}h${String(m).padStart(2, '0')}m${String(s).padStart(2, '0')}s)`;
+  const left = h > 0 ? `${h}h${String(m).padStart(2, '0')}m` : `${m}m${String(s).padStart(2, '0')}s`;
+  el.textContent = ms < 3.6e6 ? `⏰ Faltam ${left}` : `⏰ Fecha ${when} (em ${left})`;
 }
 
 // ---------- lobby ----------
@@ -360,9 +385,7 @@ function renderLobby() {
           </div>
           <p class="muted" style="margin-top:16px">
             ${v.settings.totalPeriods} períodos ·
-            ${v.settings.mode === 'daily'
-              ? `1 período por dia, fechando às ${String(v.settings.dailyCloseHour).padStart(2, '0')}:00`
-              : 'ao vivo: o período fecha quando todos enviarem'}
+            ${deadlineText(v.settings)}
             <br>Aquisições: ${v.settings.allowAcquisitions === false ? 'desligadas' : 'ligadas'} ·
             práticas ilegais: ${v.settings.allowIllegal === false ? 'desligadas' : 'ligadas'}
           </p>
@@ -710,6 +733,7 @@ function renderResults(tab) {
       </label>
     </div>
     ${isMe && h.autoSubmitted.includes(v.me.id) ? '<div class="warn">Você não enviou decisões neste período: foram repetidas as do período anterior.</div>' : ''}
+    ${isMe && h === v.history.at(-1) ? revealCard() : ''}
     ${eventBanners(r, companyId)}
     ${r.private ? privateCard(r) : ''}
     <div class="grid-3" style="margin-top:16px">
@@ -815,6 +839,26 @@ function renderResults(tab) {
   $('#sel-period').addEventListener('change', (e) => { S.selPeriod = Number(e.target.value); render(); });
 }
 
+function revealCard() {
+  const v = S.view;
+  const h = v.history.at(-1);
+  const m = rankMove(v.me.id);
+  const r = h.reports[v.me.id];
+  const n = v.players.length;
+  const leader = Object.entries(h.reports).sort((a, b) => b[1].stock.tsr - a[1].stock.tsr)[0];
+  const moveText = !m.delta ? 'manteve a posição' : m.delta > 0 ? `subiu ${m.delta} posição(ões) ▲` : `caiu ${-m.delta} posição(ões) ▼`;
+  return `
+    <section class="card reveal">
+      <div class="reveal-rank">${m.rank}º<small> de ${n}</small></div>
+      <div>
+        <h2 style="margin:0">Fechamento do período ${h.period}</h2>
+        <p style="margin:4px 0 0">Sua ação foi a ${money2(r.stock.price)} (<span class="${cls(r.stock.change)}">${signPct(r.stock.change)}</span> no período,
+        <span class="${cls(r.stock.tsr)}">${signPct(r.stock.tsr)}</span> no total) e você <b class="${cls(m.delta)}">${moveText}</b>.
+        ${leader[0] === v.me.id ? 'Você lidera o ranking! 🏆' : `Líder: <b>${esc(companyName(leader[0]))}</b> (${signPct(leader[1].stock.tsr)}).`}</p>
+      </div>
+    </section>`;
+}
+
 function eventBanners(r, companyId) {
   const out = [];
   const ev = r.events;
@@ -850,6 +894,24 @@ function fmtDecision(def, value) {
 }
 
 // ---------- mercado & ranking ----------
+/** Posição de cada empresa no ranking após cada período (índice 0 = início, todos empatados). */
+function rankAt(periodIndex) {
+  const h = S.view.history[periodIndex - 1];
+  if (!h) return null;
+  const ids = Object.keys(h.reports).sort((a, b) => h.reports[b].stock.tsr - h.reports[a].stock.tsr);
+  return Object.fromEntries(ids.map((id, i) => [id, i + 1]));
+}
+
+function rankMove(id, periodIndex = S.view.history.length) {
+  const now = rankAt(periodIndex);
+  const before = rankAt(periodIndex - 1);
+  if (!now) return null;
+  return { rank: now[id], delta: before ? before[id] - now[id] : 0 };
+}
+
+const moveBadge = (m) => (!m || !m.delta ? '<span class="muted">–</span>'
+  : m.delta > 0 ? `<span class="good">▲${m.delta}</span>` : `<span class="bad">▼${-m.delta}</span>`);
+
 function rankingRows() {
   const v = S.view;
   const last = v.history.at(-1);
@@ -897,11 +959,12 @@ function renderMarket(tab) {
       <h2>Ranking — valorização da ação</h2>
       <p class="muted" style="margin-top:0">Valorização total = (cotação atual + dividendos recebidos por ação) ÷ cotação inicial (R$ ${v.rules.config.initialPrice},00) − 1.</p>
       <div class="table-scroll"><table>
-        <thead><tr><th>#</th><th>Empresa</th><th class="num">Cotação</th><th class="num">Dividendos/ação</th><th class="num">Valorização</th><th class="num">Último lucro</th><th class="num">Participação</th><th class="num">Caixa</th><th class="num">Dívida</th></tr></thead>
+        <thead><tr><th>#</th><th></th><th>Empresa</th><th class="num">Cotação</th><th class="num">Dividendos/ação</th><th class="num">Valorização</th><th class="num">Último lucro</th><th class="num">Participação</th><th class="num">Caixa</th><th class="num">Dívida</th></tr></thead>
         <tbody>
           ${rows.map((x, k) => `
             <tr class="${x.p.id === v.me.id ? 'me' : ''}">
               <td>${medals[k] ?? k + 1}</td>
+              <td>${moveBadge(rankMove(x.p.id))}</td>
               <td><span class="dot" style="background:${companyColor(x.p.id)}"></span>${esc(x.p.companyName)} <small>${esc(x.p.name)}${x.p.isBot ? ' 🤖' : ''}</small>${scandalCount(x.p.id) ? ` <span title="Escândalos">🚔×${scandalCount(x.p.id)}</span>` : ''}${x.c.acquisitions.length ? ` <span title="Aquisições">🏢×${x.c.acquisitions.length}</span>` : ''}</td>
               <td class="num">${money2(x.c.price)}</td>
               <td class="num">${money2(x.c.cumDividendsPerShare)}</td>

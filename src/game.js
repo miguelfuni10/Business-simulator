@@ -10,6 +10,8 @@ import { BOT_COMPANY_NAMES, BOT_PROFILES, botTurn } from './bots.js';
 export const MAX_PLAYERS = 12;
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
 const MIN_GAP_BEFORE_DEADLINE_MS = 3 * 60 * 60 * 1000;
+export const PERIOD_MINUTES = Object.freeze([5, 10, 15, 30, 60, 120, 240, 480, 720, 1440]);
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 export class GameError extends Error {
   constructor(status, message) {
@@ -64,11 +66,18 @@ function addPlayer(game, { name, companyName, isBot = false, botProfile = null }
 export function createGame(exists, input, now = Date.now()) {
   const totalPeriods = Math.round(Number(input.totalPeriods) || 10);
   if (totalPeriods < 3 || totalPeriods > 40) throw new GameError(400, 'O número de períodos deve ficar entre 3 e 40.');
-  const mode = input.mode === 'daily' ? 'daily' : 'live';
+  // Prazo de cada período: 'timer' (N minutos), 'daily' (todo dia num horário) ou 'live' (sem prazo).
+  const mode = ['timer', 'daily', 'live'].includes(input.mode) ? input.mode : 'timer';
   const dailyCloseHour = Math.round(Number(input.dailyCloseHour));
   if (mode === 'daily' && !(dailyCloseHour >= 0 && dailyCloseHour <= 23)) {
     throw new GameError(400, 'Escolha um horário de fechamento entre 0h e 23h.');
   }
+  const periodMinutes = Math.round(Number(input.periodMinutes) || 60);
+  if (mode === 'timer' && !PERIOD_MINUTES.includes(periodMinutes)) {
+    throw new GameError(400, 'Prazo por período inválido.');
+  }
+  // Sem prazo, o período só pode fechar quando todos enviam (ou pelo anfitrião).
+  const closeEarly = mode === 'live' || (input.closeEarly !== false && input.closeEarly !== 'false');
   const game = {
     code: newCode(exists),
     createdAt: now,
@@ -79,7 +88,9 @@ export function createGame(exists, input, now = Date.now()) {
     settings: {
       totalPeriods,
       mode,
+      periodMinutes: mode === 'timer' ? periodMinutes : null,
       dailyCloseHour: mode === 'daily' ? dailyCloseHour : null,
+      closeEarly,
       tzOffset: Math.round(Number(input.tzOffset) || 0),
       allowAcquisitions: input.allowAcquisitions !== false && input.allowAcquisitions !== 'false',
       allowIllegal: input.allowIllegal !== false && input.allowIllegal !== 'false',
@@ -154,11 +165,25 @@ export function startGame(game, player, now = Date.now()) {
   game.status = 'running';
   game.period = 1;
   game.env = initialEnvironment();
-  game.nextDeadline = game.settings.mode === 'daily'
-    ? nextDailyDeadline(game.settings.dailyCloseHour, game.settings.tzOffset, now)
-    : null;
+  game.nextDeadline = deadlineAfter(game.settings, now);
   touch(game, now);
 }
+
+/**
+ * Próximo prazo de fechamento. No modo diário, um fechamento pelo relógio (scheduledAt) mantém o ritmo
+ * de um período por dia mesmo se o servidor estava dormindo; no modo cronômetro, o prazo conta a partir
+ * do fechamento, para ninguém perder a vez porque o servidor acordou atrasado.
+ */
+function deadlineAfter(settings, now, scheduledAt = null) {
+  if (settings.mode === 'daily') {
+    return scheduledAt ? scheduledAt + DAY_MS : nextDailyDeadline(settings.dailyCloseHour, settings.tzOffset, now);
+  }
+  if (settings.mode === 'timer') return now + settings.periodMinutes * 60_000;
+  return null;
+}
+
+/** Partidas antigas não tinham closeEarly: as "ao vivo" fechavam antes, as diárias não. */
+const closesEarly = (settings) => settings.closeEarly ?? settings.mode === 'live';
 
 export function submitDecisions(game, player, raw, now = Date.now()) {
   if (game.status !== 'running') throw new GameError(400, 'A partida não está em andamento.');
@@ -170,7 +195,7 @@ export function submitDecisions(game, player, raw, now = Date.now()) {
   };
   touch(game, now);
   const humans = game.players.filter((p) => !p.isBot);
-  if (game.settings.mode === 'live' && humans.every((p) => game.pending[p.id])) closePeriod(game, now);
+  if (closesEarly(game.settings) && humans.every((p) => game.pending[p.id])) closePeriod(game, now);
 }
 
 export function forceClose(game, player, now = Date.now()) {
@@ -226,11 +251,7 @@ export function closePeriod(game, now = Date.now(), { scheduledAt = null } = {})
     game.env = generateEnvironment(game.env, createRng(periodSeed(game.seed, game.period, 2)), game.period, {
       allowAcquisitions: game.settings.allowAcquisitions !== false,
     });
-    game.nextDeadline = game.settings.mode === 'daily'
-      // Fechamento pelo relógio mantém o ritmo diário (mesmo se o servidor estava dormindo);
-      // fechamento antecipado pelo anfitrião dá o prazo do próximo dia.
-      ? (scheduledAt ? scheduledAt + 24 * 60 * 60 * 1000 : nextDailyDeadline(game.settings.dailyCloseHour, game.settings.tzOffset, now))
-      : null;
+    game.nextDeadline = deadlineAfter(game.settings, now, scheduledAt);
   }
   touch(game, now);
 }
