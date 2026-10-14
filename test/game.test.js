@@ -4,7 +4,7 @@ import { once } from 'node:events';
 import {
   addBot, closePeriod, createGame, joinGame, nextDailyDeadline, runDeadlines, startGame, submitDecisions, viewFor,
 } from '../src/game.js';
-import { Store } from '../src/store.js';
+import { MemoryStore, RedisStore } from '../src/store.js';
 import { createServer } from '../server.js';
 
 const never = () => false;
@@ -102,7 +102,7 @@ test('anfitrião pode desligar práticas ilegais e aquisições', () => {
 });
 
 test('API HTTP: criar, entrar, adicionar robô, começar e jogar', async () => {
-  const server = createServer(new Store(null));
+  const server = createServer(new MemoryStore());
   server.listen(0);
   await once(server, 'listening');
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -133,4 +133,49 @@ test('API HTTP: criar, entrar, adicionar robô, começar e jogar', async () => {
   } finally {
     server.close();
   }
+});
+
+test('modo diário: servidor que dormiu fecha todos os períodos vencidos e mantém o ritmo', () => {
+  const now = Date.UTC(2026, 0, 10, 10, 0);
+  const { game, player: host } = createGame(never, { name: 'Ana', companyName: 'Alfa', totalPeriods: 5, mode: 'daily', dailyCloseHour: 22, tzOffset: 180 });
+  addBot(game, host, 'conservadora');
+  startGame(game, host, now);
+  const first = game.nextDeadline;
+  const day = 24 * 60 * 60 * 1000;
+  assert.equal(runDeadlines(game, first + 2 * day + 60_000), true); // acordou 2 dias depois
+  assert.equal(game.period, 4);
+  assert.equal(game.nextDeadline, first + 3 * day);
+});
+
+test('RedisStore grava e recarrega partidas pela API REST do Upstash', async () => {
+  const kv = new Map();
+  const sets = new Map();
+  const run = ([cmd, ...args]) => {
+    if (cmd === 'SET') { kv.set(args[0], args[1]); return 'OK'; }
+    if (cmd === 'SADD') { const s = sets.get(args[0]) ?? new Set(); s.add(args[1]); sets.set(args[0], s); return 1; }
+    if (cmd === 'SMEMBERS') return [...(sets.get(args[0]) ?? [])];
+    if (cmd === 'MGET') return args.map((k) => kv.get(k) ?? null);
+    throw new Error(`comando inesperado ${cmd}`);
+  };
+  const calls = [];
+  const fakeFetch = async (url, init) => {
+    assert.equal(init.headers.Authorization, 'Bearer segredo');
+    const body = JSON.parse(init.body);
+    calls.push(url);
+    const result = url.endsWith('/pipeline') ? body.map((c) => ({ result: run(c) })) : { result: run(body) };
+    return { ok: true, json: async () => result };
+  };
+  const a = new RedisStore('https://exemplo.upstash.io/', 'segredo', { fetchImpl: fakeFetch });
+  await a.load();
+  const { game } = createGame(never, { name: 'Ana', companyName: 'Alfa', totalPeriods: 3, mode: 'live' });
+  a.add(game);
+  game.version = 7;
+  a.save(game);
+  await a.flush();
+  assert.ok(calls.includes('https://exemplo.upstash.io/pipeline'));
+
+  const b = new RedisStore('https://exemplo.upstash.io', 'segredo', { fetchImpl: fakeFetch });
+  await b.load();
+  assert.equal(b.get(game.code).version, 7);
+  assert.equal(b.get(game.code).players[0].companyName, 'Alfa');
 });

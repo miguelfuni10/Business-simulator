@@ -73,17 +73,39 @@ npm run simulate   # 200 partidas só com robôs, para conferir o balanceamento
 npm run demo       # partida de teste com 3 rodadas, mostrando leilão, trapaça e denúncia
 ```
 
-Variáveis de ambiente: `PORT` (padrão 3000) e `DATA_FILE` (padrão `data/games.json`), onde as partidas ficam salvas.
+Variáveis de ambiente: `PORT` (padrão 3000), `DATA_FILE` (padrão `data/games.json`) e, para guardar as partidas
+no Upstash Redis, `UPSTASH_REDIS_REST_URL` e `UPSTASH_REDIS_REST_TOKEN`.
 
-### Jogando com amigos pela internet
+### Publicar de graça (Render + Upstash)
 
-O servidor precisa ficar no ar durante toda a partida (no modo diário, por vários dias) e o arquivo de dados precisa
-sobreviver a reinícios. Opções:
+O jeito recomendado e gratuito: o **Render** roda o site e o **Upstash Redis** guarda as partidas. Nenhum dos dois
+pede cartão de crédito no plano gratuito.
 
-- **Railway / Fly.io / Render** com o `Dockerfile` incluso e um **volume persistente** montado em `/data`.
-  Atenção: sem disco persistente (comum em planos gratuitos), as partidas se perdem quando o servidor reinicia ou "dorme".
-- **Um computador de casa** rodando `npm start` + um túnel (ex.: `cloudflared tunnel --url http://localhost:3000`)
-  para gerar um link público.
+1. **Banco de dados (Upstash)**: crie uma conta em [upstash.com](https://upstash.com), clique em *Create Database*
+   (Redis, região mais próxima, plano Free). Na página do banco, na seção **REST API**, copie
+   `UPSTASH_REDIS_REST_URL` e `UPSTASH_REDIS_REST_TOKEN`.
+2. **Site (Render)**: crie uma conta em [render.com](https://render.com) entrando com o GitHub. Clique em
+   *New → Blueprint*, escolha este repositório e o branch. O Render lê o arquivo `render.yaml` e pede as duas
+   variáveis do passo 1: cole os valores e confirme.
+3. Em alguns minutos o Render mostra o endereço `https://simulador-de-empresas-xxxx.onrender.com`. É esse link que
+   você manda para os amigos.
+
+Como funciona no plano gratuito:
+
+- O site **dorme após 15 minutos sem acesso** e leva cerca de 1 minuto para acordar no próximo acesso.
+  As partidas não se perdem, porque ficam no Upstash.
+- No modo **diário**, se o servidor estiver dormindo no horário de fechamento, o período é fechado assim que alguém
+  abrir o site. O resultado é o mesmo, e o ritmo de um período por dia é mantido.
+- Os limites gratuitos (750 horas de servidor por mês no Render e 500 mil comandos por mês no Upstash) sobram
+  para partidas entre amigos.
+
+Sem as variáveis do Upstash, o jogo salva em `data/games.json`. Isso serve para rodar no seu computador ou num
+servidor com disco persistente (o `Dockerfile` usa `/data`).
+
+### Outras opções
+
+- **Seu computador + túnel**: `npm start` e `cloudflared tunnel --url http://localhost:3000` geram um link
+  público, que só funciona com o computador ligado. Bom para uma partida ao vivo numa noite.
 - **Mesma rede Wi-Fi**: `npm start` e os amigos acessam `http://SEU-IP:3000`.
 
 ## Estrutura
@@ -93,7 +115,8 @@ server.js            servidor HTTP (API JSON + arquivos estáticos), sem depend�
 src/engine.js        motor de simulação: mercado, contabilidade e cotação
 src/bots.js          empresas-robô
 src/game.js          regras da partida: sala, envio de decisões, fechamento de períodos
-src/store.js         persistência em arquivo JSON
+src/store.js         persistência (arquivo JSON ou Upstash Redis)
+render.yaml          implantação gratuita no Render
 public/              front-end (HTML/CSS/JS puro)
 test/                testes (node --test)
 scripts/simulate.js  simulação de balanceamento

@@ -179,7 +179,7 @@ export function forceClose(game, player, now = Date.now()) {
   closePeriod(game, now);
 }
 
-export function closePeriod(game, now = Date.now()) {
+export function closePeriod(game, now = Date.now(), { scheduledAt = null } = {}) {
   if (game.status !== 'running') return;
   const lastReports = game.history.at(-1)?.reports ?? {};
   const botRng = createRng(periodSeed(game.seed, game.period, 3));
@@ -227,7 +227,9 @@ export function closePeriod(game, now = Date.now()) {
       allowAcquisitions: game.settings.allowAcquisitions !== false,
     });
     game.nextDeadline = game.settings.mode === 'daily'
-      ? nextDailyDeadline(game.settings.dailyCloseHour, game.settings.tzOffset, now)
+      // Fechamento pelo relógio mantém o ritmo diário (mesmo se o servidor estava dormindo);
+      // fechamento antecipado pelo anfitrião dá o prazo do próximo dia.
+      ? (scheduledAt ? scheduledAt + 24 * 60 * 60 * 1000 : nextDailyDeadline(game.settings.dailyCloseHour, game.settings.tzOffset, now))
       : null;
   }
   touch(game, now);
@@ -235,11 +237,13 @@ export function closePeriod(game, now = Date.now()) {
 
 /** Fecha períodos de partidas diárias cujo prazo venceu. Retorna true se algo mudou. */
 export function runDeadlines(game, now = Date.now()) {
-  if (game.status === 'running' && game.nextDeadline && now >= game.nextDeadline) {
-    closePeriod(game, now);
-    return true;
+  let changed = false;
+  // Fecha todos os períodos vencidos (o servidor pode ter ficado dormindo vários dias).
+  while (game.status === 'running' && game.nextDeadline && now >= game.nextDeadline) {
+    closePeriod(game, now, { scheduledAt: game.nextDeadline });
+    changed = true;
   }
-  return false;
+  return changed;
 }
 
 function companySnapshot(c) {

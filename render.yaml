@@ -1,0 +1,15 @@
+# Implantação no Render (plano gratuito). Veja "Publicar de graça" no README.
+services:
+  - type: web
+    name: simulador-de-empresas
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /
+    envVars:
+      # Credenciais do banco gratuito Upstash Redis (preencha no painel do Render).
+      - key: UPSTASH_REDIS_REST_URL
+        sync: false
+      - key: UPSTASH_REDIS_REST_TOKEN
+        sync: false

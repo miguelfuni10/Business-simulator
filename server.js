@@ -3,7 +3,7 @@ import http from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Store } from './src/store.js';
+import { openStore } from './src/store.js';
 import {
   GameError, addBot, authenticate, createGame, forceClose, joinGame, removePlayer, runDeadlines,
   startGame, submitDecisions, viewFor,
@@ -80,9 +80,11 @@ export function createServer(store) {
         if (match[1]) {
           game = store.get(match[1]);
           if (!game) throw new GameError(404, 'Partida não encontrada. Confira o código.');
+          // Fecha períodos vencidos na hora do acesso: a hospedagem pode ter ficado dormindo.
+          if (runDeadlines(game)) store.save(game);
         }
         const result = await handler(req, game, url);
-        if (req.method !== 'GET') store.save();
+        if (req.method !== 'GET' && game) store.save(game);
         return sendJson(res, 200, result);
       }
       if (req.method !== 'GET' && req.method !== 'HEAD') throw new GameError(405, 'Método não permitido.');
@@ -140,16 +142,17 @@ async function serveStatic(pathname, res) {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const store = new Store(DATA_FILE);
+  const store = await openStore(process.env, DATA_FILE);
   const server = createServer(store);
   setInterval(() => {
-    let changed = false;
-    for (const game of store.all()) changed = runDeadlines(game) || changed;
-    if (changed) store.save();
+    for (const game of store.all()) if (runDeadlines(game)) store.save(game);
   }, 15_000);
-  const shutdown = () => {
-    store.flush();
-    process.exit(0);
+  const shutdown = async () => {
+    try {
+      await store.flush();
+    } finally {
+      process.exit(0);
+    }
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
